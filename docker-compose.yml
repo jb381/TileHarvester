@@ -22,7 +22,7 @@ services:
     # docker compose run --rm tileharvester sync
     command: ["--help"]
 
-  # Optional: scheduled sync using cron inside a lightweight container
+  # Background sync — runs tileharvester sync in a loop
   tileharvester-cron:
     build: .
     image: tileharvester:latest
@@ -35,16 +35,8 @@ services:
       - TH_STRAVA_CLIENT_SECRET=${TH_STRAVA_CLIENT_SECRET}
       - TH_POLL_INTERVAL_MINUTES=${TH_POLL_INTERVAL_MINUTES:-5}
       - TH_SQUADRAT_OFFSET=${TH_SQUADRAT_OFFSET:-0}
-    # Override entrypoint so we can run a shell command
-    entrypoint: ["/bin/sh", "-c"]
-    command: >
-      apt-get update && apt-get install -y cron &&
-      echo '*/5 * * * * root /app/.venv/bin/tileharvester sync --once >> /var/log/tileharvester.log 2>&1' > /etc/cron.d/tileharvester &&
-      chmod 0644 /etc/cron.d/tileharvester &&
-      crontab /etc/cron.d/tileharvester &&
-      touch /var/log/tileharvester.log &&
-      cron &&
-      tail -f /var/log/tileharvester.log
+    command: ["sync"]
+    restart: unless-stopped
     profiles:
       - cron
 
