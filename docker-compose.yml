@@ -1,0 +1,54 @@
+services:
+  tileharvester:
+    build: .
+    image: tileharvester:latest
+    container_name: tileharvester
+    # Mount data volume for persistent SQLite DB and tokens
+    volumes:
+      - tileharvester-data:/data
+    environment:
+      - TH_DATA_DIR=/data
+      # Set these before running:
+      - TH_STRAVA_CLIENT_ID=${TH_STRAVA_CLIENT_ID}
+      - TH_STRAVA_CLIENT_SECRET=${TH_STRAVA_CLIENT_SECRET}
+      - TH_STRAVA_REDIRECT_URI=${TH_STRAVA_REDIRECT_URI:-http://localhost:8000/callback}
+      - TH_POLL_INTERVAL_MINUTES=${TH_POLL_INTERVAL_MINUTES:-5}
+      - TH_SQUADRAT_OFFSET=${TH_SQUADRAT_OFFSET:-0}
+    # For auth command, you need interactive mode:
+    # docker compose run --rm tileharvester auth
+    # For one-shot sync:
+    # docker compose run --rm tileharvester sync --once
+    # For continuous sync (override default):
+    # docker compose run --rm tileharvester sync
+    command: ["--help"]
+
+  # Optional: scheduled sync using cron inside a lightweight container
+  tileharvester-cron:
+    build: .
+    image: tileharvester:latest
+    container_name: tileharvester-cron
+    volumes:
+      - tileharvester-data:/data
+    environment:
+      - TH_DATA_DIR=/data
+      - TH_STRAVA_CLIENT_ID=${TH_STRAVA_CLIENT_ID}
+      - TH_STRAVA_CLIENT_SECRET=${TH_STRAVA_CLIENT_SECRET}
+      - TH_POLL_INTERVAL_MINUTES=${TH_POLL_INTERVAL_MINUTES:-5}
+      - TH_SQUADRAT_OFFSET=${TH_SQUADRAT_OFFSET:-0}
+    # Install cron and run scheduled syncs
+    command: >
+      sh -c "
+        apt-get update && apt-get install -y cron &&
+        echo '*/5 * * * * root /app/.venv/bin/tileharvester sync --once >> /var/log/tileharvester.log 2>&1' > /etc/cron.d/tileharvester &&
+        chmod 0644 /etc/cron.d/tileharvester &&
+        crontab /etc/cron.d/tileharvester &&
+        touch /var/log/tileharvester.log &&
+        cron &&
+        tail -f /var/log/tileharvester.log
+      "
+    profiles:
+      - cron
+
+volumes:
+  tileharvester-data:
+    driver: local
