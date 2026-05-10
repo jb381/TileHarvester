@@ -40,12 +40,36 @@ Then either leave `uv run tileharvester sync` running, or use Docker/systemd for
 ## Docker (set it and forget it) 🐳
 
 ```bash
+# 1. grab it
+git clone <repo> && cd tileharvester
+
+# 2. create your env
+cp .env.example .env
+# edit .env and add your Strava creds
+
+# 3. build
+docker compose build
+
+# 4. one-time setup
 docker compose run --rm tileharvester auth
 docker compose run --rm tileharvester backfill
+
+# 5. start background sync (checks every 5 minutes)
 docker compose --profile cron up -d tileharvester-cron
+
+# 6. watch the logs
+docker compose --profile cron logs -f tileharvester-cron
 ```
 
-Checks every 5 minutes. Data survives in a Docker volume.
+Data survives in a Docker volume (`tileharvester-data`).
+
+### Updating later
+
+```bash
+git pull
+docker compose build
+docker compose --profile cron up -d tileharvester-cron
+```
 
 ## Common commands
 
