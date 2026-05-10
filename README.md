@@ -83,31 +83,41 @@ docker compose --profile cron up -d tileharvester-cron
 
 Run `tileharvester --help` for the full menu.
 
-## Why your counts might be off 🎯
+## How data gets processed
 
-By default, TileHarvester uses **summary polylines** (simplified GPS lines) from Strava to compute tiles. Polylines cut corners and skip points, which makes routes cross extra tile boundaries and **overcount tiles**. The longer the activity, the bigger the drift.
+TileHarvester has two ways to compute tiles from Strava activities:
 
-For accurate counts that match Squadrats, you should **refine** your data. This re-fetches the full GPS stream for each activity and recomputes tiles from the actual recorded points.
+| Method | Accuracy | Speed | Used by |
+|--------|----------|-------|---------|
+| **Summary polyline** | Lower (corners cut) | Fast | `backfill` |
+| **Full GPS stream** | Higher (actual points) | Slower | `sync`, `refine` |
 
-```bash
-# Refine historical activities using full GPS streams
-uv run tileharvester refine
+### One-time setup flow
+
+```
+auth → backfill (fast, summaries) → refine (accurate, full streams)
 ```
 
-Or with Docker:
+1. **`auth`** — log in to Strava once
+2. **`backfill`** — fetches your entire history quickly using summary polylines
+3. **`refine`** — re-fetches full GPS streams for those historical activities to get accurate counts
 
-```bash
-docker compose run --rm tileharvester refine
+### Ongoing flow
+
+```
+cron sync → automatically uses full GPS streams for every new activity
 ```
 
-Check your refinement status with `tileharvester status` — look for the "Stream-refined" vs "Needs stream refinement" counts.
+**New activities are always processed from full streams** — you get the best accuracy automatically going forward. Only historical data from `backfill` needs refinement.
+
+Check your refinement status with `tileharvester status` — look for "Stream-refined" vs "Needs stream refinement".
 
 ### Rebuilding totals
 
-If you change sport type filters or want to recalculate everything:
+If you change sport type filters or need to recalculate:
 
-- **`recompute`** — rebuilds from stored data. Stream-refined activities are preserved; only summary-polyline activities get recomputed.
-- **`recompute-novelty`** — safe and fast. Just rebuilds global totals from existing tiles without re-fetching anything.
+- **`recompute`** — rebuilds from stored data. Preserves refined activities, only recomputes summary ones.
+- **`recompute-novelty`** — safe and fast. Rebuilds global totals from existing tiles without re-fetching anything.
 
 ### Manual offset
 
