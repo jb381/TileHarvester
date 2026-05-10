@@ -83,9 +83,32 @@ docker compose --profile cron up -d tileharvester-cron
 
 Run `tileharvester --help` for the full menu.
 
-## Numbers looking off? 🎯
+## Why your counts might be off 🎯
 
-Tile counts are computed from Strava GPS streams — they should be close, but don't always match Squadrats' official numbers pixel-for-pixel. If your lifetime total drifts, you can nudge it:
+By default, TileHarvester uses **summary polylines** (simplified GPS lines) from Strava to compute tiles. Polylines cut corners and skip points, which makes routes cross extra tile boundaries and **overcount tiles**. The longer the activity, the bigger the drift.
+
+For accurate counts that match Squadrats, you should **refine** your data. This re-fetches the full GPS stream for each activity and recomputes tiles from the actual recorded points.
+
+```bash
+# Refine historical activities using full GPS streams
+uv run tileharvester refine
+
+# Rebuild global totals from the refined data
+uv run tileharvester recompute
+```
+
+Or with Docker:
+
+```bash
+docker compose run --rm tileharvester refine
+docker compose run --rm tileharvester recompute
+```
+
+Check your refinement status with `tileharvester status` — look for the "Stream-refined" vs "Needs stream refinement" counts.
+
+### Manual offset
+
+If counts still drift after refinement, you can nudge the lifetime total:
 
 ```bash
 # Bump your lifetime Squadrat count by +5 on the next sync
