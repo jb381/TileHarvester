@@ -35,17 +35,16 @@ services:
       - TH_STRAVA_CLIENT_SECRET=${TH_STRAVA_CLIENT_SECRET}
       - TH_POLL_INTERVAL_MINUTES=${TH_POLL_INTERVAL_MINUTES:-5}
       - TH_SQUADRAT_OFFSET=${TH_SQUADRAT_OFFSET:-0}
-    # Install cron and run scheduled syncs
+    # Override entrypoint so we can run a shell command
+    entrypoint: ["/bin/sh", "-c"]
     command: >
-      sh -c "
-        apt-get update && apt-get install -y cron &&
-        echo '*/5 * * * * root /app/.venv/bin/tileharvester sync --once >> /var/log/tileharvester.log 2>&1' > /etc/cron.d/tileharvester &&
-        chmod 0644 /etc/cron.d/tileharvester &&
-        crontab /etc/cron.d/tileharvester &&
-        touch /var/log/tileharvester.log &&
-        cron &&
-        tail -f /var/log/tileharvester.log
-      "
+      apt-get update && apt-get install -y cron &&
+      echo '*/5 * * * * root /app/.venv/bin/tileharvester sync --once >> /var/log/tileharvester.log 2>&1' > /etc/cron.d/tileharvester &&
+      chmod 0644 /etc/cron.d/tileharvester &&
+      crontab /etc/cron.d/tileharvester &&
+      touch /var/log/tileharvester.log &&
+      cron &&
+      tail -f /var/log/tileharvester.log
     profiles:
       - cron
 
