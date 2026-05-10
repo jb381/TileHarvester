@@ -901,9 +901,12 @@ def refine_streams(limit: Optional[int] = 80, force: bool = False) -> dict:
 
 
 def recompute_all() -> dict:
-    """Recompute activity tiles and novelty from stored summary polylines."""
+    """Recompute activity tiles and novelty from stored summary polylines.
+
+    Preserves stream-refined activities — only recomputes activities that were
+    processed from summary polylines.
+    """
     with get_db() as conn:
-        conn.execute("DELETE FROM activity_tiles")
         conn.execute("DELETE FROM global_tiles")
         ignored_sports = settings.ignored_sports
         if ignored_sports:
@@ -936,6 +939,18 @@ def recompute_all() -> dict:
                   AND has_gps = 1
                 """
             )
+
+        # Delete tiles only for non-refined activities
+        conn.execute(
+            """
+            DELETE FROM activity_tiles
+            WHERE activity_id IN (
+                SELECT id FROM activities
+                WHERE COALESCE(tile_source, '') != 'streams_clean'
+            )
+            """
+        )
+        # Reset counts only for non-refined activities
         conn.execute(
             """
             UPDATE activities
@@ -943,6 +958,7 @@ def recompute_all() -> dict:
                 squadratinho_count = 0,
                 new_squadrat_count = 0,
                 new_squadratinho_count = 0
+            WHERE COALESCE(tile_source, '') != 'streams_clean'
             """
         )
         conn.commit()
@@ -957,16 +973,21 @@ def recompute_all() -> dict:
         ).fetchall()
 
     total = len(rows)
-    print(f"Recomputing {total} activities...")
+    refined = sum(1 for r in rows if r.get("tile_source") == "streams_clean")
+    to_recompute = total - refined
+    print(f"Recomputing {to_recompute} activities ({refined} stream-refined preserved)...")
     rebuilt = 0
     skipped = 0
-    if total:
-        _print_progress("Recomputing", 0, total)
+    if to_recompute:
+        _print_progress("Recomputing", 0, to_recompute)
     for i, row in enumerate(rows, 1):
+        if row.get("tile_source") == "streams_clean":
+            continue  # Don't touch refined data
+
         summary = row["summary_polyline"]
         if not summary:
             skipped += 1
-            _print_progress("Recomputing", i, total)
+            _print_progress("Recomputing", rebuilt + skipped, to_recompute)
             continue
 
         try:
@@ -975,12 +996,15 @@ def recompute_all() -> dict:
             points = []
         if not points:
             skipped += 1
-            _print_progress("Recomputing", i, total)
+            _print_progress("Recomputing", rebuilt + skipped, to_recompute)
             continue
 
         _store_activity_tiles(row, points, "summary_polyline")
-        _print_progress("Recomputing", i, total)
         rebuilt += 1
+        _print_progress("Recomputing", rebuilt + skipped, to_recompute)
 
-    print(f"Recompute complete: {rebuilt}/{total} rebuilt, {skipped} skipped.")
-    return {"rebuilt": rebuilt, "skipped": skipped}
+    print("Rebuilding global totals from all stored tiles...")
+    novelty = recompute_novelty_from_stored_tiles()
+
+    print(f"Recompute complete: {rebuilt} rebuilt, {refined} preserved, {skipped} skipped.")
+    return {"rebuilt": rebuilt, "preserved": refined, "skipped": skipped}

@@ -20,6 +20,7 @@ from tileharvester.sync import (
     compute_historical_novelty,
     refine_streams,
     recompute_all,
+    recompute_novelty_from_stored_tiles,
     retry_failed,
     sync_once,
 )
@@ -266,6 +267,14 @@ def recompute():
     """Recompute global tile novelty from stored activity tiles."""
     typer.echo("Recomputing global tiles...")
     result = recompute_all()
+    typer.echo(f"Rebuilt {result['rebuilt']} activities, {result.get('preserved', 0)} preserved")
+
+
+@app.command()
+def recompute_novelty():
+    """Rebuild global totals from stored tiles without re-fetching anything. Safe to run anytime."""
+    typer.echo("Rebuilding global totals from stored tiles...")
+    result = recompute_novelty_from_stored_tiles()
     typer.echo(f"Rebuilt {result['rebuilt']} activities")
 
 

@@ -91,7 +91,6 @@ For accurate counts that match Squadrats, you should **refine** your data. This 
 
 ```bash
 # Refine historical activities using full GPS streams
-# This also rebuilds global totals automatically — no need to run recompute after
 uv run tileharvester refine
 ```
 
@@ -101,9 +100,14 @@ Or with Docker:
 docker compose run --rm tileharvester refine
 ```
 
-> ⚠️ **Don't run `recompute` after `refine`** — `recompute` rebuilds from summary polylines and will undo your refinement.
-
 Check your refinement status with `tileharvester status` — look for the "Stream-refined" vs "Needs stream refinement" counts.
+
+### Rebuilding totals
+
+If you change sport type filters or want to recalculate everything:
+
+- **`recompute`** — rebuilds from stored data. Stream-refined activities are preserved; only summary-polyline activities get recomputed.
+- **`recompute-novelty`** — safe and fast. Just rebuilds global totals from existing tiles without re-fetching anything.
 
 ### Manual offset
 
