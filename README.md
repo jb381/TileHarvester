@@ -9,7 +9,7 @@ Auto-drop Squadrats stats into your Strava descriptions. No scraping, no spam �
 Every new activity gets a little line in the description:
 
 ```
-TileHarvester: +13 new Squadrats · +653 this month · +10 this week
+🗺️ TileHarvester: 1,234 Squadrats · +13 new · +653/mo · +10/wk
 ```
 
 Your friends will know you're grinding tiles 🚴‍♂️🏃‍♀️
@@ -91,18 +91,17 @@ For accurate counts that match Squadrats, you should **refine** your data. This 
 
 ```bash
 # Refine historical activities using full GPS streams
+# This also rebuilds global totals automatically — no need to run recompute after
 uv run tileharvester refine
-
-# Rebuild global totals from the refined data
-uv run tileharvester recompute
 ```
 
 Or with Docker:
 
 ```bash
 docker compose run --rm tileharvester refine
-docker compose run --rm tileharvester recompute
 ```
+
+> ⚠️ **Don't run `recompute` after `refine`** — `recompute` rebuilds from summary polylines and will undo your refinement.
 
 Check your refinement status with `tileharvester status` — look for the "Stream-refined" vs "Needs stream refinement" counts.
 
