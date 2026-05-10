@@ -3,9 +3,9 @@ services:
     build: .
     image: tileharvester:latest
     container_name: tileharvester
-    # Mount data volume for persistent SQLite DB and tokens
     volumes:
       - tileharvester-data:/data
+      - ./.env:/app/.env:ro
     environment:
       - TH_DATA_DIR=/data
       # Set these before running:
@@ -29,6 +29,7 @@ services:
     container_name: tileharvester-cron
     volumes:
       - tileharvester-data:/data
+      - ./.env:/app/.env:ro
     environment:
       - TH_DATA_DIR=/data
       - TH_STRAVA_CLIENT_ID=${TH_STRAVA_CLIENT_ID}

@@ -1,8 +1,13 @@
 """Description line manipulation for idempotent updates."""
 import re
 
+from tileharvester.config import settings
 
-LINE_PATTERN = re.compile(r"^🗺️ TileHarvester: .*$", re.MULTILINE)
+
+LINE_PATTERN = re.compile(
+    rf"^{re.escape(settings.description_emoji)}\s+{re.escape(settings.description_prefix)}: .*$",
+    re.MULTILINE,
+)
 
 
 def update_description_line(description: str, new_line: str) -> str:

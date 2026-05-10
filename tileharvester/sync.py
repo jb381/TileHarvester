@@ -500,8 +500,9 @@ def annotate_activity(activity_id: int) -> dict:
     month_total, week_total = compute_period_totals(start_local)
     total_unique = compute_total_unique_squadrats_through(activity_id, start_local) + settings.squadrat_offset
     emoji = settings.description_emoji
+    prefix = settings.description_prefix
     line = (
-        f"{emoji} TileHarvester: {total_unique:,} Squadrats · "
+        f"{emoji} {prefix}: {total_unique:,} Squadrats · "
         f"+{new_count} new · +{month_total}/mo · +{week_total}/wk"
     )
 

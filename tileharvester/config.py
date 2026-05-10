@@ -41,7 +41,7 @@ class Settings(BaseSettings):
         return {s.strip() for s in self.ignored_sport_types.split(",") if s.strip()}
 
     # Description
-    description_prefix: str = "🗺️ TileHarvester"
+    description_prefix: str = "TileHarvester"
     description_emoji: str = "🗺️"
     squadrat_offset: int = Field(default=0, description="Offset to add to squadrat totals (for tile count adjustments)")
     rewrite_existing_annotations: bool = False
