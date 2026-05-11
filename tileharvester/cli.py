@@ -3,6 +3,8 @@
 import time
 import webbrowser
 from datetime import datetime
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import typer
@@ -14,9 +16,11 @@ from tileharvester.recompute import recompute_all, recompute_novelty_from_stored
 from tileharvester.refine import refine_streams
 from tileharvester.strava_client import (
     build_auth_url,
+    classify_strava_error,
     exchange_code,
     get_activity,
     get_activity_streams,
+    get_rate_limit_status,
     is_authenticated,
 )
 from tileharvester.sync import (
@@ -28,12 +32,36 @@ from tileharvester.sync import (
 from tileharvester.systemd import install_service, print_service
 from tileharvester.tile_engine import make_engine
 
-app = typer.Typer(help="TileHarvester - Automatically add Squadrats stats to Strava activities")
+
+def _package_version() -> str:
+    """Return installed package version, falling back to pyproject for source checkouts."""
+    try:
+        return version("tileharvester")
+    except PackageNotFoundError:
+        pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        if pyproject.exists():
+            for line in pyproject.read_text().splitlines():
+                if line.startswith("version = "):
+                    return line.split("=", 1)[1].strip().strip('"')
+        return "unknown"
 
 
-@app.callback()
-def callback() -> None:
+__version__ = _package_version()
+
+app = typer.Typer(
+    help="TileHarvester - Automatically add Squadrats stats to Strava activities",
+    no_args_is_help=True,
+)
+
+
+@app.callback(invoke_without_command=True)
+def callback(
+    show_version: bool = typer.Option(False, "--version", help="Show version and exit"),
+) -> None:
     """Run before every command."""
+    if show_version:
+        typer.echo(f"tileharvester v{__version__}")
+        raise typer.Exit()
     migrate()
 
 
@@ -87,7 +115,7 @@ def auth(
         tokens = exchange_code(code)
         typer.echo(f"Authenticated successfully. Athlete ID: {tokens.get('athlete', {}).get('id')}")
     except Exception as e:
-        typer.echo(f"Authentication failed: {e}")
+        typer.echo(f"Authentication failed: {classify_strava_error(e)}")
         raise typer.Exit(1) from e
 
 
@@ -101,8 +129,12 @@ def backfill(
         raise typer.Exit(1)
 
     typer.echo("Starting backfill...")
-    result = run_backfill(limit=limit)
-    typer.echo(f"Backfill complete: {result['stored']} stored, {result['processed']} processed")
+    try:
+        result = run_backfill(limit=limit)
+        typer.echo(f"Backfill complete: {result['stored']} stored, {result['processed']} processed")
+    except Exception as e:
+        typer.echo(f"Backfill failed: {classify_strava_error(e)}")
+        raise typer.Exit(1) from e
 
 
 @app.command()
@@ -123,17 +155,25 @@ def sync(
 
     if once:
         typer.echo("Running sync...")
-        result = sync_once()
-        typer.echo(
-            f"Sync complete: {result['new_activities']} new, {result['processed']} processed, {result['annotated']} annotated"
-        )
+        try:
+            result = sync_once()
+            typer.echo(
+                f"Sync complete: {result['new_activities']} new, {result['processed']} processed, {result['annotated']} annotated"
+            )
+        except Exception as e:
+            typer.echo(f"Sync failed: {classify_strava_error(e)}")
+            raise typer.Exit(1) from e
     else:
         typer.echo("Starting continuous sync loop (press Ctrl+C to stop)...")
         try:
             while True:
-                result = sync_once()
-                if result["annotated"] > 0:
-                    typer.echo(f"Annotated {result['annotated']} activities")
+                try:
+                    result = sync_once()
+                    if result["annotated"] > 0:
+                        typer.echo(f"Annotated {result['annotated']} activities")
+                except Exception as e:
+                    typer.echo(f"Sync cycle failed: {classify_strava_error(e)}")
+                    typer.echo("Waiting before retry...")
                 time.sleep(settings.poll_interval_minutes * 60)
         except KeyboardInterrupt:
             typer.echo("\nStopped.")
@@ -147,8 +187,12 @@ def retry() -> None:
         raise typer.Exit(1)
 
     typer.echo("Retrying failed activities...")
-    result = retry_failed()
-    typer.echo(f"Retried {result['retried']}, succeeded {result['success']}")
+    try:
+        result = retry_failed()
+        typer.echo(f"Retried {result['retried']}, succeeded {result['success']}")
+    except Exception as e:
+        typer.echo(f"Retry failed: {classify_strava_error(e)}")
+        raise typer.Exit(1) from e
 
 
 @app.command()
@@ -166,11 +210,15 @@ def refine(
         typer.echo("Not authenticated. Run 'tileharvester auth' first.")
         raise typer.Exit(1)
 
-    result = refine_streams(limit=limit, force=force)
-    typer.echo(
-        f"Refine complete: {result['refined']}/{result['selected']} refined, "
-        f"{result['failed']} failed, {result['splits']} GPS gaps split, {result['rebuilt']} rebuilt"
-    )
+    try:
+        result = refine_streams(limit=limit, force=force)
+        typer.echo(
+            f"Refine complete: {result['refined']}/{result['selected']} refined, "
+            f"{result['failed']} failed, {result['splits']} GPS gaps split, {result['rebuilt']} rebuilt"
+        )
+    except Exception as e:
+        typer.echo(f"Refine failed: {classify_strava_error(e)}")
+        raise typer.Exit(1) from e
 
 
 @app.command()
@@ -315,13 +363,14 @@ def validate(
             activity = get_activity(activity_id)
             start_local = activity.get("start_date_local")
         except Exception as e:
-            typer.echo(f"Failed to fetch metadata: {e}")
+            typer.echo(f"Failed: {classify_strava_error(e)}")
+            raise typer.Exit(1) from e
 
     typer.echo(f"Fetching activity {activity_id} GPS stream...")
     try:
         streams = get_activity_streams(activity_id, keys="latlng,time")
     except Exception as e:
-        typer.echo(f"Failed to fetch: {e}")
+        typer.echo(f"Failed: {classify_strava_error(e)}")
         raise typer.Exit(1) from e
 
     segments, stream_stats = clean_stream_segments(streams)
@@ -385,6 +434,67 @@ def validate(
             )
             typer.echo(f"    Recomputed new Squadrats match stored: {squadrat_match}")
             typer.echo(f"    Recomputed new Squadratinhos match stored: {squadratinho_match}")
+
+
+@app.command()
+def health(
+    check_rate_limit: bool = typer.Option(
+        True, help="Check Strava API rate limit status (consumes one API call)"
+    ),
+) -> None:
+    """Check system health: DB, Strava auth, and rate limits."""
+    import sqlite3
+
+    issues: list[str] = []
+    typer.echo("TileHarvester Health Check")
+    typer.echo("=" * 40)
+
+    # DB check
+    try:
+        with get_db() as conn:
+            conn.execute("SELECT 1").fetchone()
+        typer.echo("Database:                  OK")
+    except sqlite3.Error as e:
+        issues.append(f"Database: {e}")
+        typer.echo(f"Database:                  FAILED - {e}")
+
+    # DB path
+    typer.echo(f"DB location:               {settings.db_path}")
+    typer.echo(f"Data directory:            {settings.data_dir}")
+
+    # Strava auth check
+    if is_authenticated():
+        typer.echo("Strava auth:               Authenticated")
+    else:
+        issues.append("Strava auth: not authenticated")
+        typer.echo("Strava auth:               NOT AUTHENTICATED (run 'tileharvester auth')")
+
+    # Rate limit check
+    if check_rate_limit and is_authenticated():
+        typer.echo("Checking Strava rate limits...")
+        rate_status = get_rate_limit_status()
+        if rate_status.get("ok"):
+            daily_limit = rate_status.get("daily_limit", "?")
+            daily_used = rate_status.get("daily_used", "?")
+            fifteen_min_limit = rate_status.get("fifteen_min_limit", "")
+            fifteen_min_used = rate_status.get("fifteen_min_used", "")
+            typer.echo(f"  Daily usage:             {daily_used}/{daily_limit}")
+            if fifteen_min_limit and fifteen_min_used:
+                typer.echo(f"  15-min usage:            {fifteen_min_used}/{fifteen_min_limit}")
+        else:
+            err = rate_status.get("error", "Unknown error")
+            issues.append(f"Rate limit check: {err}")
+            typer.echo(f"  Rate limit check:        FAILED - {err}")
+
+    # Summary
+    typer.echo("")
+    if issues:
+        typer.echo(f"Issues found: {len(issues)}")
+        for issue in issues:
+            typer.echo(f"  - {issue}")
+        raise typer.Exit(1)
+    else:
+        typer.echo("All checks passed.")
 
 
 @app.command()

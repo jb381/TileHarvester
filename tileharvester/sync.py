@@ -6,10 +6,12 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import polyline
+from rich.progress import track
 
 from tileharvester.config import settings
 from tileharvester.db import get_db
 from tileharvester.strava_client import (
+    classify_strava_error,
     get_activities,
     get_activity_streams,
 )
@@ -50,22 +52,6 @@ def _pending_status(has_gps: bool, sport_type: str | None) -> str:
     if _is_ignored_sport(sport_type):
         return "skipped_ignored_sport"
     return "pending" if has_gps else "skipped_no_gps"
-
-
-def _print_progress(label: str, current: int, total: int) -> None:
-    """Render a compact in-place progress bar."""
-    if total <= 0:
-        print(f"{label}: 0/0")
-        return
-
-    width = 30
-    ratio = min(max(current / total, 0), 1)
-    filled = round(width * ratio)
-    bar = "#" * filled + "-" * (width - filled)
-    percent = ratio * 100
-    print(f"\r{label}: [{bar}] {current}/{total} {percent:5.1f}%", end="", flush=True)
-    if current >= total:
-        print()
 
 
 def _distance_meters(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -433,8 +419,9 @@ def compute_activity_tiles(activity_id: int) -> dict[str, Any]:
     try:
         streams = get_activity_streams(activity_id, keys="latlng,time")
     except Exception as e:
-        _set_activity_status(activity_id, "failed", str(e))
-        return {"status": "failed", "activity_id": activity_id, "error": str(e)}
+        error_msg = str(classify_strava_error(e))
+        _set_activity_status(activity_id, "failed", error_msg)
+        return {"status": "failed", "activity_id": activity_id, "error": error_msg}
 
     segments, stream_stats = clean_stream_segments(streams)
     if not any(segments):
@@ -599,7 +586,7 @@ def sync_once() -> dict[str, Any]:
         ).fetchall()
 
     processed = 0
-    for row in rows:
+    for row in track(rows, description="Processing tiles", disable=not rows):
         result = compute_activity_tiles(row["id"])
         if result["status"] == "processed":
             processed += 1
@@ -615,7 +602,7 @@ def sync_once() -> dict[str, Any]:
         ).fetchall()
 
     annotated = 0
-    for row in rows:
+    for row in track(rows, description="Annotating", disable=not rows):
         result = annotate_activity(row["id"])
         if result["status"] == "annotated":
             annotated += 1
@@ -631,6 +618,10 @@ def sync_once() -> dict[str, Any]:
 
 def retry_failed() -> dict[str, Any]:
     """Retry failed processing or annotation."""
+    from rich.console import Console
+
+    console = Console()
+
     with get_db() as conn:
         rows = conn.execute(
             "SELECT id FROM activities WHERE status = 'failed' ORDER BY start_local"
@@ -639,15 +630,13 @@ def retry_failed() -> dict[str, Any]:
     total_failed = len(rows)
     retried = 0
     success = 0
-    if total_failed:
-        print(f"Retrying {total_failed} failed activities...")
-    for i, row in enumerate(rows, 1):
-        if i % 10 == 0 or i == 1:
-            print(f"  [{i}/{total_failed}] retrying {row['id']}...")
+    for row in track(rows, description="Retrying failed processing", disable=not total_failed):
         result = compute_activity_tiles(row["id"])
         retried += 1
         if result["status"] == "processed":
             success += 1
+        elif result.get("error"):
+            console.log(f"Activity {row['id']}: {result.get('error', '')[:120]}")
 
     # Also retry failed annotations
     with get_db() as conn:
@@ -656,11 +645,9 @@ def retry_failed() -> dict[str, Any]:
         ).fetchall()
 
     total_anno_failed = len(rows)
-    if total_anno_failed:
-        print(f"Retrying {total_anno_failed} failed annotations...")
-    for i, row in enumerate(rows, 1):
-        if i % 10 == 0 or i == 1:
-            print(f"  [{i}/{total_anno_failed}] retrying annotation {row['id']}...")
+    for row in track(
+        rows, description="Retrying failed annotations", disable=not total_anno_failed
+    ):
         result = annotate_activity(row["id"])
         retried += 1
         if result["status"] == "annotated":

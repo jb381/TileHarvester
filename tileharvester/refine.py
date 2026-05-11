@@ -2,13 +2,15 @@
 
 from typing import Any
 
+from rich.console import Console
+from rich.progress import track
+
 from tileharvester.config import settings
 from tileharvester.db import get_db
 from tileharvester.recompute import recompute_novelty_from_stored_tiles
-from tileharvester.sync import (
-    _print_progress,
-    compute_activity_tiles,
-)
+from tileharvester.sync import compute_activity_tiles
+
+console = Console()
 
 
 def refine_streams(limit: int | None = None, force: bool = False) -> dict[str, Any]:
@@ -45,18 +47,14 @@ def refine_streams(limit: int | None = None, force: bool = False) -> dict[str, A
     refined = 0
     failed = 0
     splits = 0
-    if total:
-        _print_progress("Refining", 0, total)
-    for i, row in enumerate(rows, 1):
+    for row in track(rows, description="Refining"):
         result = compute_activity_tiles(row["id"])
         if result["status"] == "processed":
             refined += 1
             splits += result.get("splits", 0)
         else:
             failed += 1
-            print()
-            print(f"Activity {row['id']}: {result['status']} - {result.get('error', '')}")
-        _print_progress("Refining", i, total)
+            console.log(f"Activity {row['id']}: {result['status']} - {result.get('error', '')}")
 
     if refined:
         print("Rebuilding global unique totals from stored activity tiles...")

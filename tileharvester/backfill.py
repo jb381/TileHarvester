@@ -2,12 +2,16 @@
 
 from typing import Any
 
+from rich.console import Console
+from rich.progress import track
+
 from tileharvester.db import get_db
 from tileharvester.sync import (
-    _print_progress,
     compute_activity_tiles_from_summary,
     fetch_and_store_summaries,
 )
+
+console = Console()
 
 
 def backfill(limit: int | None = None) -> dict[str, Any]:
@@ -55,9 +59,7 @@ def backfill(limit: int | None = None) -> dict[str, Any]:
     summary_processed = 0
     stream_fallbacks = 0
     failed = 0
-    if total:
-        _print_progress("Processing", 0, total)
-    for i, row in enumerate(rows, 1):
+    for row in track(rows, description="Processing"):
         result = compute_activity_tiles_from_summary(row["id"])
         if result["status"] in ("processed", "skipped_no_gps"):
             processed += 1
@@ -67,9 +69,7 @@ def backfill(limit: int | None = None) -> dict[str, Any]:
                 stream_fallbacks += 1
         else:
             failed += 1
-            print()
-            print(f"Activity {row['id']}: {result['status']} - {result.get('error', '')}")
-        _print_progress("Processing", i, total)
+            console.log(f"Activity {row['id']}: {result['status']} - {result.get('error', '')}")
 
     print(
         f"Backfill complete: {processed}/{total} processed "

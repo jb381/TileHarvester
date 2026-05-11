@@ -3,11 +3,11 @@
 from typing import Any
 
 import polyline
+from rich.progress import track
 
 from tileharvester.config import settings
 from tileharvester.db import get_db
 from tileharvester.sync import (
-    _print_progress,
     _prior_activity_tiles,
     _store_activity_tiles,
 )
@@ -173,20 +173,15 @@ def recompute_all() -> dict[str, Any]:
 
     total = len(rows)
     refined = sum(1 for r in rows if r.get("tile_source") == "streams_clean")
+    rows_to_recompute = [r for r in rows if r.get("tile_source") != "streams_clean"]
     to_recompute = total - refined
     print(f"Recomputing {to_recompute} activities ({refined} stream-refined preserved)...")
     rebuilt = 0
     skipped = 0
-    if to_recompute:
-        _print_progress("Recomputing", 0, to_recompute)
-    for _i, row in enumerate(rows, 1):
-        if row.get("tile_source") == "streams_clean":
-            continue  # Don't touch refined data
-
+    for row in track(rows_to_recompute, description="Recomputing", disable=not rows_to_recompute):
         summary = row["summary_polyline"]
         if not summary:
             skipped += 1
-            _print_progress("Recomputing", rebuilt + skipped, to_recompute)
             continue
 
         try:
@@ -195,12 +190,10 @@ def recompute_all() -> dict[str, Any]:
             points = []
         if not points:
             skipped += 1
-            _print_progress("Recomputing", rebuilt + skipped, to_recompute)
             continue
 
         _store_activity_tiles(row, points, "summary_polyline")
         rebuilt += 1
-        _print_progress("Recomputing", rebuilt + skipped, to_recompute)
 
     print("Rebuilding global totals from all stored tiles...")
     recompute_novelty_from_stored_tiles()

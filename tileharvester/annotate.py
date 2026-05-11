@@ -7,6 +7,7 @@ from tileharvester.config import settings
 from tileharvester.db import get_db
 from tileharvester.descriptions import update_description_line
 from tileharvester.strava_client import (
+    classify_strava_error,
     get_activity,
     update_activity_description,
 )
@@ -67,10 +68,11 @@ def annotate_activity(activity_id: int) -> dict[str, Any]:
             "line": line,
         }
     except Exception as e:
+        error_msg = str(classify_strava_error(e))
         with get_db() as conn:
             conn.execute(
                 "UPDATE activities SET annotation_status = ?, last_error = ? WHERE id = ?",
-                ("failed", str(e), activity_id),
+                ("failed", error_msg, activity_id),
             )
             conn.commit()
-        return {"status": "annotation_failed", "activity_id": activity_id, "error": str(e)}
+        return {"status": "annotation_failed", "activity_id": activity_id, "error": error_msg}

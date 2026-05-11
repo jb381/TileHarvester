@@ -166,25 +166,27 @@
 
 ## ✨ Polish
 
-- [ ] **Add `--version` flag to CLI**
-  - Read version from `pyproject.toml`
+- [x] **Add `--version` flag to CLI**
+  - Read version from `pyproject.toml` via `importlib.metadata`
+  - Added `--version` option to callback; `invoke_without_command=True` + `no_args_is_help=True` for bare CLI invocation
 
-- [ ] **Improve error messages**
-  - Distinguish between auth errors, rate limits, network errors, and data errors
-  - Suggest next steps in error messages
+- [x] **Improve error messages**
+  - Added `StravaError` exception hierarchy with `classify_strava_error()` for auth/ratelimit/network/data/server errors
+  - All CLI commands now catch and classify Strava API errors with actionable suggestions
+  - Error storage in DB (annotate.py, sync.py) now uses classified error messages
 
-- [ ] **Add progress bars for long operations**
-  - Backfill processing hundreds of activities
-  - Refine processing many activities
-  - Consider `rich` or `tqdm` for better UX
+- [x] **Add progress bars for long operations**
+  - Replaced custom `_print_progress` ASCII bar with `rich.progress.track` in backfill.py, refine.py, recompute.py
+  - Added progress bars to `sync_once` tile processing and annotation phases
+  - Added progress bars to `retry_failed` with rich `console.log` for per-item errors
+  - Added `rich>=13.0.0` to project dependencies
 
-- [ ] **Clean up repository**
-  - Remove committed `.pyc` files and `__pycache__` (they exist in the repo currently)
-  - Verify `.gitignore` works correctly
-  - Remove old test cache files (`tests/__pycache__/test_tile_engine.cpython-314-pytest-9.0.3.pyc` etc.)
+- [x] **Clean up repository**
+  - Verified `.gitignore` works correctly (confirmed via `git ls-files`, `git status --ignored`)
+  - Added `.idea/`, `.vscode/`, `*.swp`, `*.swo`, `*~` to `.gitignore`
+  - No committed `.pyc` or `__pycache__` files found in the repo
 
-- [ ] **Add health check endpoint or command**
-  - Verify Strava auth is valid
-  - Verify DB is accessible
-  - Verify rate limit status
-  - Could be `tileharvester health` or part of `status`
+- [x] **Add health check endpoint or command**
+  - Added `health` command that verifies: DB accessibility, Strava authentication, API rate limit status
+  - Added `--no-check-rate-limit` flag to skip rate limit check (saves API calls)
+  - Added `get_rate_limit_status()` to strava_client.py for lightweight rate limit queries
