@@ -1,4 +1,4 @@
-"""Sync, backfill, and activity processing logic."""
+"""Core sync logic and shared utilities for activity processing."""
 
 import math
 import sqlite3
@@ -9,12 +9,9 @@ import polyline
 
 from tileharvester.config import settings
 from tileharvester.db import get_db
-from tileharvester.descriptions import update_description_line
 from tileharvester.strava_client import (
     get_activities,
-    get_activity,
     get_activity_streams,
-    update_activity_description,
 )
 from tileharvester.tile_engine import make_engine
 
@@ -433,7 +430,6 @@ def compute_activity_tiles(activity_id: int) -> dict[str, Any]:
         _set_activity_status(activity_id, "skipped_no_gps")
         return {"status": "skipped_no_gps", "activity_id": activity_id, "source": "streams_clean"}
 
-    # Fetch full streams so suspicious gaps can be split before tile traversal.
     try:
         streams = get_activity_streams(activity_id, keys="latlng,time")
     except Exception as e:
@@ -525,145 +521,9 @@ def compute_total_unique_squadrats_through(activity_id: int, start_local: str) -
     return int(total)
 
 
-def annotate_activity(activity_id: int) -> dict[str, Any]:
-    """Update Strava description with TileHarvester line."""
-    with get_db() as conn:
-        row = conn.execute("SELECT * FROM activities WHERE id = ?", (activity_id,)).fetchone()
-        if row is None:
-            raise ValueError(f"Activity {activity_id} not found")
-
-        if row["status"] != "processed":
-            return {"status": "not_processed", "activity_id": activity_id}
-
-        new_count = row["new_squadrat_count"]
-        start_local = row["start_local"]
-
-    month_total, week_total = compute_period_totals(start_local)
-    total_unique = (
-        compute_total_unique_squadrats_through(activity_id, start_local) + settings.squadrat_offset
-    )
-    emoji = settings.description_emoji
-    prefix = settings.description_prefix
-    line = (
-        f"{emoji} {prefix}: {total_unique:,} Squadrats · "
-        f"+{new_count} new · +{month_total}/mo · +{week_total}/wk"
-    )
-
-    try:
-        current = get_activity(activity_id)
-        current_desc = current.get("description") or ""
-        new_desc = update_description_line(current_desc, line)
-
-        if new_desc != current_desc:
-            update_activity_description(activity_id, new_desc)
-            annotation_status = "updated"
-        else:
-            annotation_status = "skipped"
-
-        with get_db() as conn:
-            conn.execute(
-                """
-                UPDATE activities
-                SET annotation_status = ?, description_line = ?, annotated_at = ?
-                WHERE id = ?
-                """,
-                (annotation_status, line, datetime.utcnow().isoformat(), activity_id),
-            )
-            conn.commit()
-        return {
-            "status": "annotated",
-            "activity_id": activity_id,
-            "line": line,
-        }
-    except Exception as e:
-        with get_db() as conn:
-            conn.execute(
-                "UPDATE activities SET annotation_status = ?, last_error = ? WHERE id = ?",
-                ("failed", str(e), activity_id),
-            )
-            conn.commit()
-        return {"status": "annotation_failed", "activity_id": activity_id, "error": str(e)}
-
-
-def backfill(limit: int | None = None) -> dict[str, Any]:
-    """Fetch and process historical activities. Does NOT annotate old descriptions."""
-    print("Fetching activity summaries...")
-    total_fetched = 0
-    total_stored = 0
-    total_updated = 0
-    total_skipped = 0
-    total_ignored = 0
-    page = 1
-    per_page = 200
-    while True:
-        result = fetch_and_store_summaries(page=page, per_page=per_page)
-        fetched = result["fetched"]
-        total_fetched += fetched
-        total_stored += result["stored"]
-        total_updated += result["updated"]
-        total_skipped += result["skipped"]
-        total_ignored += result["ignored"]
-        if fetched == 0:
-            break
-        print(
-            f"  page {page}: fetched {fetched}, stored {result['stored']}, "
-            f"updated {result['updated']}, skipped {result['skipped']}, ignored {result['ignored']} "
-            f"({total_fetched} fetched total)..."
-        )
-        page += 1
-        if fetched < per_page or (limit and total_fetched >= limit):
-            break
-
-    print(
-        f"Stored {total_stored} new summaries, updated {total_updated} existing summaries, "
-        f"marked {total_skipped} non-GPS skipped, {total_ignored} ignored sports."
-    )
-
-    with get_db() as conn:
-        rows = conn.execute(
-            "SELECT id FROM activities WHERE status = 'pending' AND has_gps = 1 ORDER BY start_local"
-        ).fetchall()
-
-    total = len(rows)
-    print(f"Processing {total} activities with GPS...")
-    processed = 0
-    summary_processed = 0
-    stream_fallbacks = 0
-    failed = 0
-    if total:
-        _print_progress("Processing", 0, total)
-    for i, row in enumerate(rows, 1):
-        result = compute_activity_tiles_from_summary(row["id"])
-        if result["status"] in ("processed", "skipped_no_gps"):
-            processed += 1
-            if result.get("source") == "summary_polyline":
-                summary_processed += 1
-            elif result.get("source") == "streams_clean":
-                stream_fallbacks += 1
-        else:
-            failed += 1
-            print()
-            print(f"Activity {row['id']}: {result['status']} - {result.get('error', '')}")
-        _print_progress("Processing", i, total)
-
-    print(
-        f"Backfill complete: {processed}/{total} processed "
-        f"({summary_processed} from summary polylines, {stream_fallbacks} stream fallbacks, {failed} failed)."
-    )
-    return {
-        "stored": total_stored,
-        "processed": processed,
-        "summary_processed": summary_processed,
-        "stream_fallbacks": stream_fallbacks,
-        "failed": failed,
-        "skipped": total_skipped,
-        "ignored": total_ignored,
-    }
-
-
 def sync_once() -> dict[str, Any]:
     """Incremental sync: fetch recent, compute tiles, annotate new activities."""
-    after = int((datetime.utcnow() - timedelta(days=7)).timestamp())
+    after = int((datetime.utcnow() - timedelta(days=settings.sync_lookback_days)).timestamp())
     activities = get_activities(per_page=50, after=after)
 
     new_count = 0
@@ -745,11 +605,13 @@ def sync_once() -> dict[str, Any]:
             processed += 1
 
     # Annotate only recent unannotated activities (not old ones)
-    one_day_ago = (datetime.utcnow() - timedelta(days=1)).isoformat()
+    annotation_cutoff = (
+        datetime.utcnow() - timedelta(days=settings.sync_annotation_window_days)
+    ).isoformat()
     with get_db() as conn:
         rows = conn.execute(
             "SELECT id FROM activities WHERE status = 'processed' AND (annotation_status IS NULL OR annotation_status = 'none') AND start_local >= ? ORDER BY start_local",
-            (one_day_ago,),
+            (annotation_cutoff,),
         ).fetchall()
 
     annotated = 0
@@ -807,258 +669,38 @@ def retry_failed() -> dict[str, Any]:
     return {"retried": retried, "success": success}
 
 
+def annotate_activity(activity_id: int) -> dict[str, Any]:
+    """Backward-compatible wrapper for :func:`tileharvester.annotate.annotate_activity`."""
+    from tileharvester.annotate import annotate_activity as _annotate_activity
+
+    return _annotate_activity(activity_id)
+
+
+def backfill(limit: int | None = None) -> dict[str, Any]:
+    """Backward-compatible wrapper for :func:`tileharvester.backfill.backfill`."""
+    from tileharvester.backfill import backfill as _backfill
+
+    return _backfill(limit=limit)
+
+
 def recompute_novelty_from_stored_tiles() -> dict[str, Any]:
-    """Rebuild global tiles and per-activity novelty from existing activity_tiles."""
-    with get_db() as conn:
-        conn.execute("DELETE FROM global_tiles")
-        conn.execute("UPDATE activity_tiles SET is_new = 0")
-        conn.execute(
-            """
-            UPDATE activities
-            SET new_squadrat_count = 0,
-                new_squadratinho_count = 0
-            WHERE status = 'processed'
-            """
-        )
-        conn.commit()
+    """Backward-compatible wrapper for recomputing novelty from stored tiles."""
+    from tileharvester.recompute import (
+        recompute_novelty_from_stored_tiles as _recompute_novelty_from_stored_tiles,
+    )
 
-        rows = conn.execute(
-            "SELECT id, start_local FROM activities WHERE status = 'processed' ORDER BY start_local"
-        ).fetchall()
-
-    rebuilt = 0
-    for row in rows:
-        aid = row["id"]
-        start_local = row["start_local"]
-        with get_db() as conn:
-            squadrats = {
-                r["tile_id"]
-                for r in conn.execute(
-                    "SELECT tile_id FROM activity_tiles WHERE activity_id = ? AND tile_kind = 'squadrat'",
-                    (aid,),
-                ).fetchall()
-            }
-            squadratinhos = {
-                r["tile_id"]
-                for r in conn.execute(
-                    "SELECT tile_id FROM activity_tiles WHERE activity_id = ? AND tile_kind = 'squadratinho'",
-                    (aid,),
-                ).fetchall()
-            }
-
-            new_squadrats = squadrats - _prior_activity_tiles(
-                conn, "squadrat", squadrats, start_local, aid
-            )
-            new_squadratinhos = squadratinhos - _prior_activity_tiles(
-                conn, "squadratinho", squadratinhos, start_local, aid
-            )
-
-            conn.executemany(
-                "UPDATE activity_tiles SET is_new = 1 WHERE activity_id = ? AND tile_kind = 'squadrat' AND tile_id = ?",
-                [(aid, t) for t in new_squadrats],
-            )
-            conn.executemany(
-                "UPDATE activity_tiles SET is_new = 1 WHERE activity_id = ? AND tile_kind = 'squadratinho' AND tile_id = ?",
-                [(aid, t) for t in new_squadratinhos],
-            )
-            conn.executemany(
-                """
-                INSERT INTO global_tiles (tile_kind, tile_id, first_activity_id, first_seen_local)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(tile_kind, tile_id) DO UPDATE SET
-                    first_activity_id = excluded.first_activity_id,
-                    first_seen_local = excluded.first_seen_local
-                WHERE excluded.first_seen_local < global_tiles.first_seen_local
-                """,
-                [("squadrat", t, aid, start_local) for t in new_squadrats],
-            )
-            conn.executemany(
-                """
-                INSERT INTO global_tiles (tile_kind, tile_id, first_activity_id, first_seen_local)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(tile_kind, tile_id) DO UPDATE SET
-                    first_activity_id = excluded.first_activity_id,
-                    first_seen_local = excluded.first_seen_local
-                WHERE excluded.first_seen_local < global_tiles.first_seen_local
-                """,
-                [("squadratinho", t, aid, start_local) for t in new_squadratinhos],
-            )
-            conn.execute(
-                "UPDATE activities SET new_squadrat_count = ?, new_squadratinho_count = ? WHERE id = ?",
-                (len(new_squadrats), len(new_squadratinhos), aid),
-            )
-            conn.commit()
-            rebuilt += 1
-
-    return {"rebuilt": rebuilt}
+    return _recompute_novelty_from_stored_tiles()
 
 
-def refine_streams(limit: int | None = 80, force: bool = False) -> dict[str, Any]:
-    """Refine stored activity tiles by fetching full Strava GPS streams."""
-    filters = ["status = 'processed'", "has_gps = 1"]
-    params: list[object] = []
-    ignored_sports = sorted(settings.ignored_sports)
-    if ignored_sports:
-        filters.append(f"sport_type NOT IN ({','.join('?' for _ in ignored_sports)})")
-        params.extend(ignored_sports)
-    if not force:
-        filters.append("COALESCE(tile_source, '') != ?")
-        params.append("streams_clean")
+def refine_streams(limit: int | None = None, force: bool = False) -> dict[str, Any]:
+    """Backward-compatible wrapper for :func:`tileharvester.refine.refine_streams`."""
+    from tileharvester.refine import refine_streams as _refine_streams
 
-    limit_clause = ""
-    if limit and limit > 0:
-        limit_clause = "LIMIT ?"
-        params.append(limit)
-
-    with get_db() as conn:
-        rows = conn.execute(
-            f"""
-            SELECT * FROM activities
-            WHERE {" AND ".join(filters)}
-            ORDER BY start_local
-            {limit_clause}
-            """,
-            tuple(params),
-        ).fetchall()
-
-    total = len(rows)
-    print(f"Refining {total} activities from full GPS streams...")
-    refined = 0
-    failed = 0
-    splits = 0
-    if total:
-        _print_progress("Refining", 0, total)
-    for i, row in enumerate(rows, 1):
-        result = compute_activity_tiles(row["id"])
-        if result["status"] == "processed":
-            refined += 1
-            splits += result.get("splits", 0)
-        else:
-            failed += 1
-            print()
-            print(f"Activity {row['id']}: {result['status']} - {result.get('error', '')}")
-        _print_progress("Refining", i, total)
-
-    if refined:
-        print("Rebuilding global unique totals from stored activity tiles...")
-        novelty = recompute_novelty_from_stored_tiles()
-    else:
-        novelty = {"rebuilt": 0}
-
-    return {
-        "refined": refined,
-        "failed": failed,
-        "selected": total,
-        "rebuilt": novelty["rebuilt"],
-        "splits": splits,
-    }
+    return _refine_streams(limit=limit, force=force)
 
 
 def recompute_all() -> dict[str, Any]:
-    """Recompute activity tiles and novelty from stored summary polylines.
+    """Backward-compatible wrapper for :func:`tileharvester.recompute.recompute_all`."""
+    from tileharvester.recompute import recompute_all as _recompute_all
 
-    Preserves stream-refined activities — only recomputes activities that were
-    processed from summary polylines.
-    """
-    with get_db() as conn:
-        conn.execute("DELETE FROM global_tiles")
-        ignored_sports = settings.ignored_sports
-        if ignored_sports:
-            placeholders = ",".join("?" for _ in ignored_sports)
-            conn.execute(
-                f"""
-                UPDATE activities
-                SET status = 'skipped_ignored_sport'
-                WHERE sport_type IN ({placeholders})
-                  AND status IN ('pending', 'processed', 'failed')
-                """,
-                tuple(ignored_sports),
-            )
-            conn.execute(
-                f"""
-                UPDATE activities
-                SET status = 'processed'
-                WHERE status = 'skipped_ignored_sport'
-                  AND has_gps = 1
-                  AND sport_type NOT IN ({placeholders})
-                """,
-                tuple(ignored_sports),
-            )
-        else:
-            conn.execute(
-                """
-                UPDATE activities
-                SET status = 'processed'
-                WHERE status = 'skipped_ignored_sport'
-                  AND has_gps = 1
-                """
-            )
-
-        # Delete tiles only for non-refined activities
-        conn.execute(
-            """
-            DELETE FROM activity_tiles
-            WHERE activity_id IN (
-                SELECT id FROM activities
-                WHERE COALESCE(tile_source, '') != 'streams_clean'
-            )
-            """
-        )
-        # Reset counts only for non-refined activities
-        conn.execute(
-            """
-            UPDATE activities
-            SET squadrat_count = 0,
-                squadratinho_count = 0,
-                new_squadrat_count = 0,
-                new_squadratinho_count = 0
-            WHERE COALESCE(tile_source, '') != 'streams_clean'
-            """
-        )
-        conn.commit()
-
-        rows = conn.execute(
-            """
-            SELECT * FROM activities
-            WHERE status = 'processed'
-              AND has_gps = 1
-            ORDER BY start_local
-            """
-        ).fetchall()
-
-    total = len(rows)
-    refined = sum(1 for r in rows if r.get("tile_source") == "streams_clean")
-    to_recompute = total - refined
-    print(f"Recomputing {to_recompute} activities ({refined} stream-refined preserved)...")
-    rebuilt = 0
-    skipped = 0
-    if to_recompute:
-        _print_progress("Recomputing", 0, to_recompute)
-    for _i, row in enumerate(rows, 1):
-        if row.get("tile_source") == "streams_clean":
-            continue  # Don't touch refined data
-
-        summary = row["summary_polyline"]
-        if not summary:
-            skipped += 1
-            _print_progress("Recomputing", rebuilt + skipped, to_recompute)
-            continue
-
-        try:
-            points = polyline.decode(summary)
-        except Exception:
-            points = []
-        if not points:
-            skipped += 1
-            _print_progress("Recomputing", rebuilt + skipped, to_recompute)
-            continue
-
-        _store_activity_tiles(row, points, "summary_polyline")
-        rebuilt += 1
-        _print_progress("Recomputing", rebuilt + skipped, to_recompute)
-
-    print("Rebuilding global totals from all stored tiles...")
-    recompute_novelty_from_stored_tiles()
-
-    print(f"Recompute complete: {rebuilt} rebuilt, {refined} preserved, {skipped} skipped.")
-    return {"rebuilt": rebuilt, "preserved": refined, "skipped": skipped}
+    return _recompute_all()

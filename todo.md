@@ -79,28 +79,28 @@
 
 ## 🏗️ Refactoring
 
-- [ ] **Break up `sync.py` (1,010 lines)**
+- [x] **Break up `sync.py` (1,010 lines)**
   - Extract `backfill.py` — backfill-specific logic
   - Extract `annotate.py` — description annotation logic
   - Extract `refine.py` — stream refinement logic
   - Extract `recompute.py` — recompute and novelty rebuild logic
   - Keep `sync.py` for the core `sync_once` orchestration only
 
-- [ ] **Fix lazy imports**
-  - `tile_engine.py:make_engine()` imports `settings` inside function — resolve circular dependency properly
-  - `cli.py:validate()` imports `get_activity`, `get_activity_streams`, `make_engine` inside function — move to top
-  - `cli.py:sync()` imports `time` inside function — move to top
+- [x] **Fix lazy imports**
+  - `tile_engine.py:make_engine()` imports `settings` at top-level — already fixed
+  - `cli.py:validate()` imports `get_activity`, `get_activity_streams`, `make_engine` at top-level — already fixed
+  - `cli.py:sync()` imports `time` at top-level — already fixed
 
-- [ ] **Fix `LINE_PATTERN` in `descriptions.py`**
-  - Currently compiled at import time from `settings.description_emoji` and `settings.description_prefix`
-  - Runtime changes to these settings won't update the regex
-  - Solution: make it a function that builds the regex on demand, or accept emoji/prefix as parameters
+- [x] **Fix `LINE_PATTERN` in `descriptions.py`**
+  - Changed from module-level constant to `_get_line_pattern()` function
+  - Builds regex on demand from current settings, supporting runtime emoji/prefix changes
+  - Updated `update_description_line`, `remove_description_line`, `has_description_line` to call `_get_line_pattern()`
 
-- [ ] **Extract constants and magic numbers**
-  - `sync_once` hardcodes `timedelta(days=7)` for lookback
-  - `sync_once` hardcodes `timedelta(days=1)` for annotation window
-  - `refine_streams` default limit of 80
-  - Make these configurable via `settings` or named constants
+- [x] **Extract constants and magic numbers**
+  - `sync_once` lookback: `timedelta(days=7)` → `settings.sync_lookback_days`
+  - `sync_once` annotation window: `timedelta(days=1)` → `settings.sync_annotation_window_days`
+  - `refine_streams` default limit of 80 → `settings.refine_default_limit`
+  - Added all three to `Settings` model in `config.py`
 
 ## 🚀 CI/CD
 

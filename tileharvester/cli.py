@@ -7,8 +7,11 @@ from urllib.parse import parse_qs, urlparse
 
 import typer
 
+from tileharvester.backfill import backfill as run_backfill
 from tileharvester.config import settings
 from tileharvester.db import get_db, migrate, reset
+from tileharvester.recompute import recompute_all, recompute_novelty_from_stored_tiles
+from tileharvester.refine import refine_streams
 from tileharvester.strava_client import (
     build_auth_url,
     exchange_code,
@@ -17,14 +20,8 @@ from tileharvester.strava_client import (
     is_authenticated,
 )
 from tileharvester.sync import (
-    backfill as sync_backfill,
-)
-from tileharvester.sync import (
     clean_stream_segments,
     compute_historical_novelty,
-    recompute_all,
-    recompute_novelty_from_stored_tiles,
-    refine_streams,
     retry_failed,
     sync_once,
 )
@@ -104,7 +101,7 @@ def backfill(
         raise typer.Exit(1)
 
     typer.echo("Starting backfill...")
-    result = sync_backfill(limit=limit)
+    result = run_backfill(limit=limit)
     typer.echo(f"Backfill complete: {result['stored']} stored, {result['processed']} processed")
 
 
@@ -156,7 +153,10 @@ def retry() -> None:
 
 @app.command()
 def refine(
-    limit: int = typer.Option(80, help="Max activities to refine this run; use 0 for all"),
+    limit: int | None = typer.Option(
+        None,
+        help="Max activities to refine this run; defaults to TH_REFINE_DEFAULT_LIMIT; use 0 for all",
+    ),
     force: bool = typer.Option(
         False, "--force", help="Refine activities even if already stream-refined"
     ),
