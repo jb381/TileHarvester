@@ -1,4 +1,4 @@
-![TileHarvester playful title banner](assets/tileharvester-title-variant-f-playful-harvester-transparent.png)
+![TileHarvester playful title banner](assets/tileharvester-title-variant-f-playful-harvester.png)
 
 # TileHarvester 🗺️✨
 
@@ -73,14 +73,14 @@ docker compose --profile cron up -d tileharvester-cron
 
 ## Common commands
 
-| Command | What it does |
-|---------|--------------|
-| `tileharvester auth` | Strava login 🔓 |
-| `tileharvester backfill` | One-time history build 📚 |
-| `tileharvester refine` | Upgrade old data to full-GPS accuracy 🔬 |
-| `tileharvester sync --once` | Single sync 🔄 |
-| `tileharvester sync` | Keep watching 👀 |
-| `tileharvester status` | What's up 📊 |
+| Command                     | What it does                             |
+| --------------------------- | ---------------------------------------- |
+| `tileharvester auth`        | Strava login 🔓                          |
+| `tileharvester backfill`    | One-time history build 📚                |
+| `tileharvester refine`      | Upgrade old data to full-GPS accuracy 🔬 |
+| `tileharvester sync --once` | Single sync 🔄                           |
+| `tileharvester sync`        | Keep watching 👀                         |
+| `tileharvester status`      | What's up 📊                             |
 
 Run `tileharvester --help` for the full menu.
 
@@ -88,10 +88,10 @@ Run `tileharvester --help` for the full menu.
 
 TileHarvester has two ways to compute tiles from Strava activities:
 
-| Method | Accuracy | Speed | Used by |
-|--------|----------|-------|---------|
-| **Summary polyline** | Lower (corners cut) | Fast | `backfill` |
-| **Full GPS stream** | Higher (actual points) | Slower | `sync`, `refine` |
+| Method               | Accuracy               | Speed  | Used by          |
+| -------------------- | ---------------------- | ------ | ---------------- |
+| **Summary polyline** | Lower (corners cut)    | Fast   | `backfill`       |
+| **Full GPS stream**  | Higher (actual points) | Slower | `sync`, `refine` |
 
 ### One-time setup flow
 
