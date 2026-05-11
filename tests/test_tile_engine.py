@@ -1,4 +1,5 @@
 """Tests for tile engine."""
+
 import math
 
 from tileharvester.tile_engine import SquadratsEngine, _latlon_to_meters

@@ -1,13 +1,13 @@
 """Strava API client with OAuth and token refresh."""
+
 import json
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
 from tileharvester.config import settings
-
 
 TOKEN_URL = "https://www.strava.com/oauth/token"
 API_BASE = "https://www.strava.com/api/v3"
@@ -17,15 +17,15 @@ def _token_file() -> Path:
     return settings.token_path
 
 
-def _save_tokens(data: dict) -> None:
+def _save_tokens(data: dict[str, Any]) -> None:
     settings.ensure_dirs()
     _token_file().write_text(json.dumps(data, indent=2))
 
 
-def _load_tokens() -> Optional[dict]:
+def _load_tokens() -> dict[str, Any] | None:
     if not _token_file().exists():
         return None
-    return json.loads(_token_file().read_text())
+    return json.loads(_token_file().read_text())  # type: ignore[no-any-return]
 
 
 def build_auth_url() -> str:
@@ -39,7 +39,7 @@ def build_auth_url() -> str:
     )
 
 
-def exchange_code(code: str) -> dict:
+def exchange_code(code: str) -> dict[str, Any]:
     resp = httpx.post(
         TOKEN_URL,
         data={
@@ -50,13 +50,13 @@ def exchange_code(code: str) -> dict:
         },
     )
     resp.raise_for_status()
-    data = resp.json()
+    data: dict[str, Any] = resp.json()
     data["expires_at"] = int(time.time()) + data.get("expires_in", 21600)
     _save_tokens(data)
     return data
 
 
-def _refresh_if_needed() -> dict:
+def _refresh_if_needed() -> dict[str, Any]:
     tokens = _load_tokens()
     if tokens is None:
         raise RuntimeError("Not authenticated. Run 'tileharvester auth' first.")
@@ -80,7 +80,7 @@ def _refresh_if_needed() -> dict:
     return tokens
 
 
-def _headers() -> dict:
+def _headers() -> dict[str, Any]:
     tokens = _refresh_if_needed()
     return {"Authorization": f"Bearer {tokens['access_token']}"}
 
@@ -100,33 +100,37 @@ def _rate_limit_sleep(response: httpx.Response) -> None:
             pass
 
 
-def get_athlete() -> dict:
+def get_athlete() -> dict[str, Any]:
     resp = httpx.get(f"{API_BASE}/athlete", headers=_headers())
     resp.raise_for_status()
     _rate_limit_sleep(resp)
-    return resp.json()
+    return resp.json()  # type: ignore[no-any-return]
 
 
-def get_activities(page: int = 1, per_page: int = 200, after: Optional[int] = None, before: Optional[int] = None) -> list[dict]:
+def get_activities(
+    page: int = 1, per_page: int = 200, after: int | None = None, before: int | None = None
+) -> list[dict[str, Any]]:
     params = {"page": page, "per_page": per_page}
     if after is not None:
         params["after"] = after
     if before is not None:
         params["before"] = before
-    resp = httpx.get(f"{API_BASE}/athlete/activities", headers=_headers(), params=params, timeout=30)
+    resp = httpx.get(
+        f"{API_BASE}/athlete/activities", headers=_headers(), params=params, timeout=30
+    )
     resp.raise_for_status()
     _rate_limit_sleep(resp)
-    return resp.json()
+    return resp.json()  # type: ignore[no-any-return]
 
 
-def get_activity(activity_id: int) -> dict:
+def get_activity(activity_id: int) -> dict[str, Any]:
     resp = httpx.get(f"{API_BASE}/activities/{activity_id}", headers=_headers(), timeout=30)
     resp.raise_for_status()
     _rate_limit_sleep(resp)
-    return resp.json()
+    return resp.json()  # type: ignore[no-any-return]
 
 
-def get_activity_streams(activity_id: int, keys: str = "latlng") -> dict:
+def get_activity_streams(activity_id: int, keys: str = "latlng") -> dict[str, Any]:
     resp = httpx.get(
         f"{API_BASE}/activities/{activity_id}/streams",
         headers=_headers(),
@@ -135,10 +139,10 @@ def get_activity_streams(activity_id: int, keys: str = "latlng") -> dict:
     )
     resp.raise_for_status()
     _rate_limit_sleep(resp)
-    return resp.json()
+    return resp.json()  # type: ignore[no-any-return]
 
 
-def update_activity_description(activity_id: int, description: str) -> dict:
+def update_activity_description(activity_id: int, description: str) -> dict[str, Any]:
     resp = httpx.put(
         f"{API_BASE}/activities/{activity_id}",
         headers=_headers(),
@@ -147,7 +151,7 @@ def update_activity_description(activity_id: int, description: str) -> dict:
     )
     resp.raise_for_status()
     _rate_limit_sleep(resp)
-    return resp.json()
+    return resp.json()  # type: ignore[no-any-return]
 
 
 def is_authenticated() -> bool:

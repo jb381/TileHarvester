@@ -1,6 +1,9 @@
 """Tile engine for Squadrats-compatible Mapbox tile computation."""
+
 import math
-from typing import Protocol
+from typing import Any, Protocol
+
+from tileharvester.config import settings
 
 # Web Mercator constants
 EARTH_RADIUS = 6378137.0  # meters
@@ -26,8 +29,7 @@ class TileEngine(Protocol):
     id: str
     version: str
 
-    def tiles_for_points(self, points: list[tuple[float, float]]) -> tuple[set[str], set[str]]:
-        ...
+    def tiles_for_points(self, points: list[tuple[float, float]]) -> tuple[set[str], set[str]]: ...
 
 
 class SquadratsEngine:
@@ -54,7 +56,9 @@ class SquadratsEngine:
         y = min(max(y, 0), n - 1)
         return f"{zoom}:{x}:{y}"
 
-    def _tiles_for_segment(self, start: tuple[float, float], end: tuple[float, float], zoom: int) -> set[str]:
+    def _tiles_for_segment(
+        self, start: tuple[float, float], end: tuple[float, float], zoom: int
+    ) -> set[str]:
         x0, y0 = start
         x1, y1 = end
         tx = math.floor(x0)
@@ -114,15 +118,16 @@ class SquadratsEngine:
         """Return (squadrats, squadratinhos) for a list of lat/lon points."""
         return self.tiles_for_segments([points] if points else [])
 
-    def tiles_for_segments(self, segments: list[list[tuple[float, float]]]) -> tuple[set[str], set[str]]:
+    def tiles_for_segments(
+        self, segments: list[list[tuple[float, float]]]
+    ) -> tuple[set[str], set[str]]:
         """Return (squadrats, squadratinhos) for one or more track segments."""
         squadrats = self._compute_tiles(segments, self.squadrat_zoom)
         squadratinhos = self._compute_tiles(segments, self.squadratinho_zoom)
         return squadrats, squadratinhos
 
 
-def make_engine(config: dict | None = None) -> SquadratsEngine:
-    from tileharvester.config import settings
+def make_engine(config: dict[str, Any] | None = None) -> SquadratsEngine:  # noqa: ARG001
     return SquadratsEngine(
         squadrat_zoom=settings.squadrat_zoom,
         squadratinho_zoom=settings.squadratinho_zoom,

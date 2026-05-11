@@ -1,8 +1,8 @@
 """Systemd service and timer generation."""
+
 from pathlib import Path
 
 from tileharvester.config import settings
-
 
 SERVICE_TEMPLATE = """\
 [Unit]
@@ -54,7 +54,9 @@ def print_service(data_dir: str | None = None, python: str | None = None) -> Non
     print("  sudo systemctl enable --now tileharvester.timer")
 
 
-def install_service(data_dir: str | None = None, python: str | None = None, interval: int = 5) -> None:
+def install_service(
+    data_dir: str | None = None, python: str | None = None, interval: int = 5
+) -> None:
     """Write systemd files to /etc/systemd/system/ (requires root)."""
     import subprocess
 

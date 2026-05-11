@@ -1,12 +1,15 @@
 """Sync, backfill, and activity processing logic."""
+
 import math
+import sqlite3
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any
 
 import polyline
 
 from tileharvester.config import settings
 from tileharvester.db import get_db
+from tileharvester.descriptions import update_description_line
 from tileharvester.strava_client import (
     get_activities,
     get_activity,
@@ -14,7 +17,6 @@ from tileharvester.strava_client import (
     update_activity_description,
 )
 from tileharvester.tile_engine import make_engine
-from tileharvester.descriptions import update_description_line
 
 
 def _week_start(dt: datetime) -> datetime:
@@ -38,7 +40,7 @@ def _parse_local(local_str: str) -> datetime:
     return datetime.fromisoformat(local_str)
 
 
-def _summary_polyline(activity: dict) -> str | None:
+def _summary_polyline(activity: dict[str, Any]) -> str | None:
     summary = (activity.get("map") or {}).get("summary_polyline")
     return summary or None
 
@@ -81,7 +83,9 @@ def _distance_meters(a: tuple[float, float], b: tuple[float, float]) -> float:
     return 2 * radius * math.asin(min(1.0, math.sqrt(h)))
 
 
-def clean_stream_segments(streams: dict) -> tuple[list[list[tuple[float, float]]], dict]:
+def clean_stream_segments(
+    streams: dict[str, Any],
+) -> tuple[list[list[tuple[float, float]]], dict[str, Any]]:
     """Build route segments from Strava streams, splitting implausible GPS jumps."""
     latlng = streams.get("latlng", {}).get("data", [])
     times = streams.get("time", {}).get("data", [])
@@ -106,9 +110,17 @@ def clean_stream_segments(streams: dict) -> tuple[list[list[tuple[float, float]]
                 speed = distance / dt
 
         split = distance > settings.stream_max_segment_meters
-        if dt is not None and dt > settings.stream_max_time_gap_seconds and distance > settings.stream_gap_min_meters:
+        if (
+            dt is not None
+            and dt > settings.stream_max_time_gap_seconds
+            and distance > settings.stream_gap_min_meters
+        ):
             split = True
-        if speed is not None and speed > settings.stream_max_speed_mps and distance > settings.stream_gap_min_meters:
+        if (
+            speed is not None
+            and speed > settings.stream_max_speed_mps
+            and distance > settings.stream_gap_min_meters
+        ):
             split = True
 
         if split:
@@ -124,7 +136,7 @@ def clean_stream_segments(streams: dict) -> tuple[list[list[tuple[float, float]]
     return segments, {"points": len(latlng), "segments": len(segments), "splits": split_count}
 
 
-def fetch_and_store_summaries(page: int = 1, per_page: int = 200) -> dict:
+def fetch_and_store_summaries(page: int = 1, per_page: int = 200) -> dict[str, Any]:
     """Fetch activity summaries and store new ones."""
     activities = get_activities(page=page, per_page=per_page)
     with get_db() as conn:
@@ -138,7 +150,9 @@ def fetch_and_store_summaries(page: int = 1, per_page: int = 200) -> dict:
             sport_type = a.get("sport_type", "")
             has_gps = bool(summary)
             status = _pending_status(has_gps, sport_type)
-            existing = conn.execute("SELECT id, status, has_gps FROM activities WHERE id = ?", (aid,)).fetchone()
+            existing = conn.execute(
+                "SELECT id, status, has_gps FROM activities WHERE id = ?", (aid,)
+            ).fetchone()
             if existing:
                 if summary:
                     cur = conn.execute(
@@ -199,18 +213,27 @@ def fetch_and_store_summaries(page: int = 1, per_page: int = 200) -> dict:
                 skipped += 1
             stored += 1
         conn.commit()
-    return {"fetched": len(activities), "stored": stored, "updated": updated, "skipped": skipped, "ignored": ignored}
+    return {
+        "fetched": len(activities),
+        "stored": stored,
+        "updated": updated,
+        "skipped": skipped,
+        "ignored": ignored,
+    }
 
 
-def _activity_row(activity_id: int):
+def _activity_row(activity_id: int) -> sqlite3.Row | None:
     with get_db() as conn:
-        return conn.execute("SELECT * FROM activities WHERE id = ?", (activity_id,)).fetchone()
+        return conn.execute("SELECT * FROM activities WHERE id = ?", (activity_id,)).fetchone()  # type: ignore[no-any-return]
 
 
 def _set_activity_status(activity_id: int, status: str, error: str | None = None) -> None:
     with get_db() as conn:
         if error is None:
-            conn.execute("UPDATE activities SET status = ?, last_error = NULL WHERE id = ?", (status, activity_id))
+            conn.execute(
+                "UPDATE activities SET status = ?, last_error = NULL WHERE id = ?",
+                (status, activity_id),
+            )
         else:
             conn.execute(
                 "UPDATE activities SET status = ?, last_error = ? WHERE id = ?",
@@ -219,8 +242,14 @@ def _set_activity_status(activity_id: int, status: str, error: str | None = None
         conn.commit()
 
 
-def _prior_activity_tiles(conn, tile_kind: str, tiles: set[str], start_local: str, activity_id: int) -> set[str]:
-    seen = set()
+def _prior_activity_tiles(
+    conn: sqlite3.Connection,
+    tile_kind: str,
+    tiles: set[str],
+    start_local: str,
+    activity_id: int,
+) -> set[str]:
+    seen: set[str] = set()
     tile_list = list(tiles)
     for i in range(0, len(tile_list), 500):
         chunk = tile_list[i : i + 500]
@@ -247,7 +276,7 @@ def compute_historical_novelty(
     start_local: str,
     squadrats: set[str],
     squadratinhos: set[str],
-) -> dict:
+) -> dict[str, Any]:
     """Compare activity tiles with processed local history before this activity."""
     with get_db() as conn:
         processed_before = conn.execute(
@@ -276,8 +305,12 @@ def compute_historical_novelty(
             """,
             (start_local,),
         ).fetchone()[0]
-        seen_squadrats = _prior_activity_tiles(conn, "squadrat", squadrats, start_local, activity_id)
-        seen_squadratinhos = _prior_activity_tiles(conn, "squadratinho", squadratinhos, start_local, activity_id)
+        seen_squadrats = _prior_activity_tiles(
+            conn, "squadrat", squadrats, start_local, activity_id
+        )
+        seen_squadratinhos = _prior_activity_tiles(
+            conn, "squadratinho", squadratinhos, start_local, activity_id
+        )
 
     new_squadrats = squadrats - seen_squadrats
     new_squadratinhos = squadratinhos - seen_squadratinhos
@@ -295,11 +328,11 @@ def compute_historical_novelty(
 
 
 def _store_activity_tiles(
-    row,
+    row: sqlite3.Row,
     points: list[tuple[float, float]],
     source: str,
     segments: list[list[tuple[float, float]]] | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Compute tiles from coordinates and persist the result."""
     engine = make_engine()
     activity_id = row["id"]
@@ -314,8 +347,12 @@ def _store_activity_tiles(
 
     with get_db() as conn:
         start_local = row["start_local"]
-        existing_squadrats = _prior_activity_tiles(conn, "squadrat", squadrats, start_local, activity_id)
-        existing_squadratinhos = _prior_activity_tiles(conn, "squadratinho", squadratinhos, start_local, activity_id)
+        existing_squadrats = _prior_activity_tiles(
+            conn, "squadrat", squadrats, start_local, activity_id
+        )
+        existing_squadratinhos = _prior_activity_tiles(
+            conn, "squadratinho", squadratinhos, start_local, activity_id
+        )
 
         new_squadrats = squadrats - existing_squadrats
         new_squadratinhos = squadratinhos - existing_squadratinhos
@@ -386,7 +423,7 @@ def _store_activity_tiles(
     }
 
 
-def compute_activity_tiles(activity_id: int) -> dict:
+def compute_activity_tiles(activity_id: int) -> dict[str, Any]:
     """Compute and store tiles from full Strava streams. Returns counts."""
     row = _activity_row(activity_id)
     if row is None:
@@ -413,7 +450,7 @@ def compute_activity_tiles(activity_id: int) -> dict:
     return result
 
 
-def compute_activity_tiles_from_summary(activity_id: int) -> dict:
+def compute_activity_tiles_from_summary(activity_id: int) -> dict[str, Any]:
     """Compute tiles from stored summary polyline, falling back to streams if needed."""
     row = _activity_row(activity_id)
     if row is None:
@@ -421,7 +458,11 @@ def compute_activity_tiles_from_summary(activity_id: int) -> dict:
 
     if not row["has_gps"]:
         _set_activity_status(activity_id, "skipped_no_gps")
-        return {"status": "skipped_no_gps", "activity_id": activity_id, "source": "summary_polyline"}
+        return {
+            "status": "skipped_no_gps",
+            "activity_id": activity_id,
+            "source": "summary_polyline",
+        }
 
     summary = row["summary_polyline"]
     if summary:
@@ -484,7 +525,7 @@ def compute_total_unique_squadrats_through(activity_id: int, start_local: str) -
     return int(total)
 
 
-def annotate_activity(activity_id: int) -> dict:
+def annotate_activity(activity_id: int) -> dict[str, Any]:
     """Update Strava description with TileHarvester line."""
     with get_db() as conn:
         row = conn.execute("SELECT * FROM activities WHERE id = ?", (activity_id,)).fetchone()
@@ -498,7 +539,9 @@ def annotate_activity(activity_id: int) -> dict:
         start_local = row["start_local"]
 
     month_total, week_total = compute_period_totals(start_local)
-    total_unique = compute_total_unique_squadrats_through(activity_id, start_local) + settings.squadrat_offset
+    total_unique = (
+        compute_total_unique_squadrats_through(activity_id, start_local) + settings.squadrat_offset
+    )
     emoji = settings.description_emoji
     prefix = settings.description_prefix
     line = (
@@ -542,7 +585,7 @@ def annotate_activity(activity_id: int) -> dict:
         return {"status": "annotation_failed", "activity_id": activity_id, "error": str(e)}
 
 
-def backfill(limit: Optional[int] = None) -> dict:
+def backfill(limit: int | None = None) -> dict[str, Any]:
     """Fetch and process historical activities. Does NOT annotate old descriptions."""
     print("Fetching activity summaries...")
     total_fetched = 0
@@ -618,12 +661,13 @@ def backfill(limit: Optional[int] = None) -> dict:
     }
 
 
-def sync_once() -> dict:
+def sync_once() -> dict[str, Any]:
     """Incremental sync: fetch recent, compute tiles, annotate new activities."""
     after = int((datetime.utcnow() - timedelta(days=7)).timestamp())
     activities = get_activities(per_page=50, after=after)
 
     new_count = 0
+    skipped = 0
     with get_db() as conn:
         for a in activities:
             aid = a["id"]
@@ -631,7 +675,9 @@ def sync_once() -> dict:
             sport_type = a.get("sport_type", "")
             has_gps = bool(summary)
             status = _pending_status(has_gps, sport_type)
-            existing = conn.execute("SELECT id, status, has_gps FROM activities WHERE id = ?", (aid,)).fetchone()
+            existing = conn.execute(
+                "SELECT id, status, has_gps FROM activities WHERE id = ?", (aid,)
+            ).fetchone()
             if existing:
                 if summary:
                     conn.execute(
@@ -658,16 +704,11 @@ def sync_once() -> dict:
                         (sport_type, aid),
                     )
                 elif existing["status"] == "pending" and not existing["has_gps"]:
-                    conn.execute(
+                    cur = conn.execute(
                         "UPDATE activities SET status = 'skipped_no_gps' WHERE id = ?",
                         (aid,),
                     )
                     skipped += cur.rowcount
-                elif summary and not existing["has_gps"]:
-                    conn.execute(
-                        "UPDATE activities SET has_gps = 1, status = 'pending' WHERE id = ?",
-                        (aid,),
-                    )
                 continue
             if not existing:
                 conn.execute(
@@ -718,10 +759,15 @@ def sync_once() -> dict:
             annotated += 1
             print(f"Annotated {row['id']}: {result['line']}")
 
-    return {"new_activities": new_count, "processed": processed, "annotated": annotated}
+    return {
+        "new_activities": new_count,
+        "processed": processed,
+        "annotated": annotated,
+        "skipped": skipped,
+    }
 
 
-def retry_failed() -> dict:
+def retry_failed() -> dict[str, Any]:
     """Retry failed processing or annotation."""
     with get_db() as conn:
         rows = conn.execute(
@@ -761,7 +807,7 @@ def retry_failed() -> dict:
     return {"retried": retried, "success": success}
 
 
-def recompute_novelty_from_stored_tiles() -> dict:
+def recompute_novelty_from_stored_tiles() -> dict[str, Any]:
     """Rebuild global tiles and per-activity novelty from existing activity_tiles."""
     with get_db() as conn:
         conn.execute("DELETE FROM global_tiles")
@@ -800,7 +846,9 @@ def recompute_novelty_from_stored_tiles() -> dict:
                 ).fetchall()
             }
 
-            new_squadrats = squadrats - _prior_activity_tiles(conn, "squadrat", squadrats, start_local, aid)
+            new_squadrats = squadrats - _prior_activity_tiles(
+                conn, "squadrat", squadrats, start_local, aid
+            )
             new_squadratinhos = squadratinhos - _prior_activity_tiles(
                 conn, "squadratinho", squadratinhos, start_local, aid
             )
@@ -845,7 +893,7 @@ def recompute_novelty_from_stored_tiles() -> dict:
     return {"rebuilt": rebuilt}
 
 
-def refine_streams(limit: Optional[int] = 80, force: bool = False) -> dict:
+def refine_streams(limit: int | None = 80, force: bool = False) -> dict[str, Any]:
     """Refine stored activity tiles by fetching full Strava GPS streams."""
     filters = ["status = 'processed'", "has_gps = 1"]
     params: list[object] = []
@@ -866,7 +914,7 @@ def refine_streams(limit: Optional[int] = 80, force: bool = False) -> dict:
         rows = conn.execute(
             f"""
             SELECT * FROM activities
-            WHERE {' AND '.join(filters)}
+            WHERE {" AND ".join(filters)}
             ORDER BY start_local
             {limit_clause}
             """,
@@ -897,10 +945,16 @@ def refine_streams(limit: Optional[int] = 80, force: bool = False) -> dict:
     else:
         novelty = {"rebuilt": 0}
 
-    return {"refined": refined, "failed": failed, "selected": total, "rebuilt": novelty["rebuilt"], "splits": splits}
+    return {
+        "refined": refined,
+        "failed": failed,
+        "selected": total,
+        "rebuilt": novelty["rebuilt"],
+        "splits": splits,
+    }
 
 
-def recompute_all() -> dict:
+def recompute_all() -> dict[str, Any]:
     """Recompute activity tiles and novelty from stored summary polylines.
 
     Preserves stream-refined activities — only recomputes activities that were
@@ -980,7 +1034,7 @@ def recompute_all() -> dict:
     skipped = 0
     if to_recompute:
         _print_progress("Recomputing", 0, to_recompute)
-    for i, row in enumerate(rows, 1):
+    for _i, row in enumerate(rows, 1):
         if row.get("tile_source") == "streams_clean":
             continue  # Don't touch refined data
 
@@ -1004,7 +1058,7 @@ def recompute_all() -> dict:
         _print_progress("Recomputing", rebuilt + skipped, to_recompute)
 
     print("Rebuilding global totals from all stored tiles...")
-    novelty = recompute_novelty_from_stored_tiles()
+    recompute_novelty_from_stored_tiles()
 
     print(f"Recompute complete: {rebuilt} rebuilt, {refined} preserved, {skipped} skipped.")
     return {"rebuilt": rebuilt, "preserved": refined, "skipped": skipped}

@@ -1,8 +1,8 @@
-![TileHarvester playful title banner](assets/tileharvester-title-variant-f-playful-harvester.png)
+![TileHarvester playful title banner](assets/tileharvester-title-variant-f-playful-harvester-transparent.png)
 
 # TileHarvester 🗺️✨
 
-Auto-drop Squadrats stats into your Strava descriptions. No scraping, no spam — just vibes.
+Auto-drop [Squadrats](https://squadrats.com/rules) stats into your Strava descriptions. No scraping, no spam — just vibes.
 
 ## What it does
 
@@ -18,7 +18,7 @@ Your friends will know you're grinding tiles 🚴‍♂️🏃‍♀️
 
 ```bash
 # 1. grab it
-git clone <repo> && cd tileharvester
+git clone https://github.com/jb381/TileHarvester.git && cd tileharvester
 uv sync
 
 # 2. grab Strava creds → https://www.strava.com/settings/api
@@ -41,7 +41,7 @@ Then either leave `uv run tileharvester sync` running, or use Docker/systemd for
 
 ```bash
 # 1. grab it
-git clone <repo> && cd tileharvester
+git clone https://github.com/jb381/TileHarvester.git && cd tileharvester
 
 # 2. create your env
 cp .env.example .env
@@ -77,6 +77,7 @@ docker compose --profile cron up -d tileharvester-cron
 |---------|--------------|
 | `tileharvester auth` | Strava login 🔓 |
 | `tileharvester backfill` | One-time history build 📚 |
+| `tileharvester refine` | Upgrade old data to full-GPS accuracy 🔬 |
 | `tileharvester sync --once` | Single sync 🔄 |
 | `tileharvester sync` | Keep watching 👀 |
 | `tileharvester status` | What's up 📊 |

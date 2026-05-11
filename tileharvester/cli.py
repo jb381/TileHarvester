@@ -1,5 +1,6 @@
 """CLI entry point using Typer."""
-import re
+
+import time
 import webbrowser
 from datetime import datetime
 from urllib.parse import parse_qs, urlparse
@@ -7,31 +8,34 @@ from urllib.parse import parse_qs, urlparse
 import typer
 
 from tileharvester.config import settings
-from tileharvester.db import migrate, reset, get_db
+from tileharvester.db import get_db, migrate, reset
 from tileharvester.strava_client import (
     build_auth_url,
     exchange_code,
-    get_athlete,
+    get_activity,
+    get_activity_streams,
     is_authenticated,
 )
 from tileharvester.sync import (
     backfill as sync_backfill,
+)
+from tileharvester.sync import (
     clean_stream_segments,
     compute_historical_novelty,
-    refine_streams,
     recompute_all,
     recompute_novelty_from_stored_tiles,
+    refine_streams,
     retry_failed,
     sync_once,
 )
-from tileharvester.systemd import print_service, install_service
+from tileharvester.systemd import install_service, print_service
 from tileharvester.tile_engine import make_engine
 
 app = typer.Typer(help="TileHarvester - Automatically add Squadrats stats to Strava activities")
 
 
 @app.callback()
-def callback():
+def callback() -> None:
     """Run before every command."""
     migrate()
 
@@ -54,14 +58,16 @@ def _extract_code(raw: str) -> str:
 def auth(
     code: str = typer.Option(None, help="Authorization code or full callback URL from Strava"),
     open_browser: bool = typer.Option(True, help="Open browser for auth"),
-):
+) -> None:
     """Authenticate with Strava."""
     if not settings.strava_client_id or not settings.strava_client_secret:
         typer.echo("Error: Set TH_STRAVA_CLIENT_ID and TH_STRAVA_CLIENT_SECRET")
         raise typer.Exit(1)
 
     if is_authenticated():
-        typer.echo("Already authenticated. Use auth --code <new-code> to re-authenticate if needed.")
+        typer.echo(
+            "Already authenticated. Use auth --code <new-code> to re-authenticate if needed."
+        )
         return
 
     url = build_auth_url()
@@ -85,13 +91,13 @@ def auth(
         typer.echo(f"Authenticated successfully. Athlete ID: {tokens.get('athlete', {}).get('id')}")
     except Exception as e:
         typer.echo(f"Authentication failed: {e}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
 
 @app.command()
 def backfill(
     limit: int = typer.Option(None, help="Limit number of activities to fetch"),
-):
+) -> None:
     """One-time backfill of historical activities into local DB."""
     if not is_authenticated():
         typer.echo("Not authenticated. Run 'tileharvester auth' first.")
@@ -107,7 +113,7 @@ def sync(
     once: bool = typer.Option(False, "--once", help="Run one sync cycle and exit"),
     emoji: str = typer.Option(None, "--emoji", help="Emoji to use in annotation (default: 🗺️)"),
     offset: int = typer.Option(None, "--offset", help="Offset to add to squadrat totals"),
-):
+) -> None:
     """Sync new activities and annotate them."""
     if not is_authenticated():
         typer.echo("Not authenticated. Run 'tileharvester auth' first.")
@@ -125,8 +131,6 @@ def sync(
             f"Sync complete: {result['new_activities']} new, {result['processed']} processed, {result['annotated']} annotated"
         )
     else:
-        import time
-
         typer.echo("Starting continuous sync loop (press Ctrl+C to stop)...")
         try:
             while True:
@@ -139,7 +143,7 @@ def sync(
 
 
 @app.command()
-def retry():
+def retry() -> None:
     """Retry failed activities."""
     if not is_authenticated():
         typer.echo("Not authenticated. Run 'tileharvester auth' first.")
@@ -153,8 +157,10 @@ def retry():
 @app.command()
 def refine(
     limit: int = typer.Option(80, help="Max activities to refine this run; use 0 for all"),
-    force: bool = typer.Option(False, "--force", help="Refine activities even if already stream-refined"),
-):
+    force: bool = typer.Option(
+        False, "--force", help="Refine activities even if already stream-refined"
+    ),
+) -> None:
     """Refine historical activity tiles using full Strava GPS streams."""
     if not is_authenticated():
         typer.echo("Not authenticated. Run 'tileharvester auth' first.")
@@ -168,22 +174,34 @@ def refine(
 
 
 @app.command()
-def status():
+def status() -> None:
     """Show current status and stats."""
     with get_db() as conn:
         total = conn.execute("SELECT COUNT(*) FROM activities").fetchone()[0]
-        processed = conn.execute("SELECT COUNT(*) FROM activities WHERE status = 'processed'").fetchone()[0]
-        pending = conn.execute("SELECT COUNT(*) FROM activities WHERE status = 'pending'").fetchone()[0]
-        skipped_no_gps = conn.execute("SELECT COUNT(*) FROM activities WHERE status = 'skipped_no_gps'").fetchone()[0]
-        skipped_ignored = conn.execute("SELECT COUNT(*) FROM activities WHERE status = 'skipped_ignored_sport'").fetchone()[0]
-        failed = conn.execute("SELECT COUNT(*) FROM activities WHERE status = 'failed'").fetchone()[0]
+        processed = conn.execute(
+            "SELECT COUNT(*) FROM activities WHERE status = 'processed'"
+        ).fetchone()[0]
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM activities WHERE status = 'pending'"
+        ).fetchone()[0]
+        skipped_no_gps = conn.execute(
+            "SELECT COUNT(*) FROM activities WHERE status = 'skipped_no_gps'"
+        ).fetchone()[0]
+        skipped_ignored = conn.execute(
+            "SELECT COUNT(*) FROM activities WHERE status = 'skipped_ignored_sport'"
+        ).fetchone()[0]
+        failed = conn.execute("SELECT COUNT(*) FROM activities WHERE status = 'failed'").fetchone()[
+            0
+        ]
         stream_refined = conn.execute(
             "SELECT COUNT(*) FROM activities WHERE status = 'processed' AND tile_source = 'streams_clean'"
         ).fetchone()[0]
         needs_refinement = conn.execute(
             "SELECT COUNT(*) FROM activities WHERE status = 'processed' AND COALESCE(tile_source, '') != 'streams_clean'"
         ).fetchone()[0]
-        annotated = conn.execute("SELECT COUNT(*) FROM activities WHERE annotation_status = 'done'").fetchone()[0]
+        annotated = conn.execute(
+            "SELECT COUNT(*) FROM activities WHERE annotation_status = 'done'"
+        ).fetchone()[0]
         annotation_failed = conn.execute(
             "SELECT COUNT(*) FROM activities WHERE annotation_status = 'failed'"
         ).fetchone()[0]
@@ -231,7 +249,7 @@ def status():
 
 
 @app.command()
-def stats():
+def stats() -> None:
     """Show detailed period stats."""
     with get_db() as conn:
         # This week
@@ -263,7 +281,7 @@ def stats():
 
 
 @app.command()
-def recompute():
+def recompute() -> None:
     """Recompute global tile novelty from stored activity tiles."""
     typer.echo("Recomputing global tiles...")
     result = recompute_all()
@@ -271,7 +289,7 @@ def recompute():
 
 
 @app.command()
-def recompute_novelty():
+def recompute_novelty() -> None:
     """Rebuild global totals from stored tiles without re-fetching anything. Safe to run anytime."""
     typer.echo("Rebuilding global totals from stored tiles...")
     result = recompute_novelty_from_stored_tiles()
@@ -281,14 +299,11 @@ def recompute_novelty():
 @app.command()
 def validate(
     activity_id: int = typer.Argument(..., help="Strava activity ID to validate"),
-):
+) -> None:
     """Compute total and historical new tiles for an activity."""
     if not is_authenticated():
         typer.echo("Not authenticated. Run 'tileharvester auth' first.")
         raise typer.Exit(1)
-
-    from tileharvester.strava_client import get_activity, get_activity_streams
-    from tileharvester.tile_engine import make_engine
 
     with get_db() as conn:
         row = conn.execute("SELECT * FROM activities WHERE id = ?", (activity_id,)).fetchone()
@@ -307,7 +322,7 @@ def validate(
         streams = get_activity_streams(activity_id, keys="latlng,time")
     except Exception as e:
         typer.echo(f"Failed to fetch: {e}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
     segments, stream_stats = clean_stream_segments(streams)
 
@@ -318,10 +333,14 @@ def validate(
     if start_local:
         typer.echo(f"  Start local:     {start_local}")
     typer.echo(f"  GPS points:      {stream_stats['points']}")
-    typer.echo(f"  Track segments:  {stream_stats['segments']} ({stream_stats['splits']} GPS gaps split)")
+    typer.echo(
+        f"  Track segments:  {stream_stats['segments']} ({stream_stats['splits']} GPS gaps split)"
+    )
     typer.echo(f"  Total Squadrats (this activity):     {len(squadrats)}")
     typer.echo(f"  Total Squadratinhos (this activity): {len(squadratinhos)}")
-    typer.echo(f"  Ratio (inho:squadrat):               {len(squadratinhos)/max(len(squadrats),1):.1f}")
+    typer.echo(
+        f"  Ratio (inho:squadrat):               {len(squadratinhos) / max(len(squadrats), 1):.1f}"
+    )
 
     novelty = None
     if start_local:
@@ -333,15 +352,21 @@ def validate(
         typer.echo(f"    Already-seen Squadrats on route:   {novelty['seen_squadrats']}")
         typer.echo(f"    New Squadrats from this activity:  {novelty['new_squadrats']}")
         typer.echo(f"    Unique Squadrats after:            {novelty['total_squadrats_after']}")
-        typer.echo(f"    Unique Squadratinhos before:       {novelty['total_squadratinhos_before']}")
+        typer.echo(
+            f"    Unique Squadratinhos before:       {novelty['total_squadratinhos_before']}"
+        )
         typer.echo(f"    Already-seen Squadratinhos route:  {novelty['seen_squadratinhos']}")
         typer.echo(f"    New Squadratinhos from activity:   {novelty['new_squadratinhos']}")
         typer.echo(f"    Unique Squadratinhos after:        {novelty['total_squadratinhos_after']}")
         typer.echo("")
-        typer.echo("  NOTE: Historical comparison only reflects activities already processed in this local DB.")
+        typer.echo(
+            "  NOTE: Historical comparison only reflects activities already processed in this local DB."
+        )
     else:
         typer.echo("")
-        typer.echo("  Could not determine start date, so historical new-tile comparison was skipped.")
+        typer.echo(
+            "  Could not determine start date, so historical new-tile comparison was skipped."
+        )
 
     if row:
         typer.echo("")
@@ -352,8 +377,12 @@ def validate(
         typer.echo(f"    Stored new Squadrats:  {row['new_squadrat_count']}")
         typer.echo(f"    Stored new Squadratinhos: {row['new_squadratinho_count']}")
         if novelty:
-            squadrat_match = "yes" if row["new_squadrat_count"] == novelty["new_squadrats"] else "no"
-            squadratinho_match = "yes" if row["new_squadratinho_count"] == novelty["new_squadratinhos"] else "no"
+            squadrat_match = (
+                "yes" if row["new_squadrat_count"] == novelty["new_squadrats"] else "no"
+            )
+            squadratinho_match = (
+                "yes" if row["new_squadratinho_count"] == novelty["new_squadratinhos"] else "no"
+            )
             typer.echo(f"    Recomputed new Squadrats match stored: {squadrat_match}")
             typer.echo(f"    Recomputed new Squadratinhos match stored: {squadratinho_match}")
 
@@ -363,7 +392,7 @@ def service(
     action: str = typer.Argument("print", help="Action: print, install"),
     interval: int = typer.Option(5, help="Timer interval in minutes"),
     python: str = typer.Option("/usr/bin/python3", help="Python executable path"),
-):
+) -> None:
     """Generate or install systemd service/timer files."""
     if action == "print":
         print_service(python=python)
@@ -372,14 +401,16 @@ def service(
             install_service(python=python, interval=interval)
         except Exception as e:
             typer.echo(f"Install failed (may need sudo): {e}")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from e
     else:
         typer.echo(f"Unknown action: {action}")
         raise typer.Exit(1)
 
 
 @app.command()
-def reset_db(force: bool = typer.Option(False, "--force", help="Confirm destructive reset")):
+def reset_db(
+    force: bool = typer.Option(False, "--force", help="Confirm destructive reset"),
+) -> None:
     """Reset the local database. DESTRUCTIVE."""
     if not force:
         typer.echo("This will delete all local data. Use --force to confirm.")
@@ -388,5 +419,5 @@ def reset_db(force: bool = typer.Option(False, "--force", help="Confirm destruct
     typer.echo("Database reset.")
 
 
-def main():
+def main() -> None:
     app()

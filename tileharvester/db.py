@@ -1,11 +1,10 @@
 """SQLite database with migrations."""
+
 import json
 import sqlite3
-from pathlib import Path
 from typing import Any
 
 from tileharvester.config import settings
-
 
 MIGRATIONS = [
     """

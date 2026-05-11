@@ -1,10 +1,9 @@
 """Configuration and settings management."""
-import os
+
 from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
 
 DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "tileharvester"
 
@@ -43,7 +42,9 @@ class Settings(BaseSettings):
     # Description
     description_prefix: str = "TileHarvester"
     description_emoji: str = "🗺️"
-    squadrat_offset: int = Field(default=0, description="Offset to add to squadrat totals (for tile count adjustments)")
+    squadrat_offset: int = Field(
+        default=0, description="Offset to add to squadrat totals (for tile count adjustments)"
+    )
     rewrite_existing_annotations: bool = False
 
     @property

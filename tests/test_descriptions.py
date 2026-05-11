@@ -1,7 +1,10 @@
 """Tests for description line manipulation."""
-import pytest
 
-from tileharvester.descriptions import update_description_line, remove_description_line, has_description_line
+from tileharvester.descriptions import (
+    has_description_line,
+    remove_description_line,
+    update_description_line,
+)
 
 
 def test_append_to_empty():
