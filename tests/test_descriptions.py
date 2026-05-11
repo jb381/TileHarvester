@@ -24,6 +24,24 @@ def test_replace_existing():
     assert "+3 new Squadrats" not in result
 
 
+def test_replace_existing_with_different_emoji(temp_settings, monkeypatch):
+    import tileharvester.config as config_mod
+    import tileharvester.descriptions as descriptions_mod
+
+    monkeypatch.setattr(config_mod, "settings", temp_settings)
+    monkeypatch.setattr(descriptions_mod, "settings", temp_settings)
+
+    desc = "Nice ride!\n🚴 TileHarvester: old stats"
+    result = update_description_line(desc, "🗺️ TileHarvester: new stats")
+    assert result == "Nice ride!\n🗺️ TileHarvester: new stats"
+
+
+def test_collapses_duplicate_existing_lines():
+    desc = "Nice ride!\n🗺️ TileHarvester: correct stats\n🗺️ TileHarvester: duplicate stats"
+    result = update_description_line(desc, "🗺️ TileHarvester: latest stats")
+    assert result == "Nice ride!\n🗺️ TileHarvester: latest stats"
+
+
 def test_remove_line():
     desc = "Nice ride!\n🗺️ TileHarvester: +3 new Squadrats"
     result = remove_description_line(desc)

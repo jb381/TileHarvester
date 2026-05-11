@@ -8,12 +8,12 @@ from tileharvester.config import settings
 def _get_line_pattern() -> re.Pattern[str]:
     """Build the TileHarvester line regex from current settings (allows runtime changes)."""
     return re.compile(
-        rf"^{re.escape(settings.description_emoji)}\s+{re.escape(settings.description_prefix)}: .*$",
+        rf"^.*\b{re.escape(settings.description_prefix)}:\s.*$",
         re.MULTILINE,
     )
 
 
-def update_description_line(description: str, new_line: str) -> str:
+def update_description_line(description: str | None, new_line: str) -> str:
     """
     Replace existing TileHarvester line if present, otherwise append.
     Handles None/empty descriptions gracefully.
@@ -23,7 +23,16 @@ def update_description_line(description: str, new_line: str) -> str:
 
     pattern = _get_line_pattern()
     if pattern.search(description):
-        return pattern.sub(new_line, description)
+        replaced = False
+        lines = []
+        for existing_line in description.splitlines():
+            if pattern.match(existing_line):
+                if not replaced:
+                    lines.append(new_line)
+                    replaced = True
+                continue
+            lines.append(existing_line)
+        return "\n".join(lines)
 
     # No existing line - append with blank line before
     if description.endswith("\n"):
@@ -32,7 +41,7 @@ def update_description_line(description: str, new_line: str) -> str:
         return description + "\n\n" + new_line
 
 
-def remove_description_line(description: str) -> str:
+def remove_description_line(description: str | None) -> str:
     """Remove the TileHarvester line entirely."""
     if not description:
         return ""
