@@ -72,6 +72,22 @@ def clean_stream_segments(
     """Build route segments from Strava streams, splitting implausible GPS jumps."""
     latlng = streams.get("latlng", {}).get("data", [])
     times = streams.get("time", {}).get("data", [])
+
+    # Edge case: empty stream
+    if not latlng:
+        return [], {"points": 0, "segments": 0, "splits": 0, "truncated": False}
+
+    # Edge case: excessively long stream, truncate with warning
+    truncated = False
+    if len(latlng) > settings.stream_max_points:
+        print(
+            f"Warning: stream has {len(latlng)} points, truncating to {settings.stream_max_points}"
+        )
+        latlng = latlng[: settings.stream_max_points]
+        if len(times) > settings.stream_max_points:
+            times = times[: settings.stream_max_points]
+        truncated = True
+
     has_times = len(times) == len(latlng)
     segments: list[list[tuple[float, float]]] = []
     current: list[tuple[float, float]] = []
@@ -116,7 +132,23 @@ def clean_stream_segments(
     if current:
         segments.append(current)
 
-    return segments, {"points": len(latlng), "segments": len(segments), "splits": split_count}
+    # Edge case: all points were filtered into single-point segments
+    # This means the data is unusable — treat as no usable GPS
+    if segments and all(len(seg) <= 1 for seg in segments):
+        return [], {
+            "points": len(latlng),
+            "segments": 0,
+            "splits": split_count,
+            "truncated": truncated,
+            "warning": "all points filtered — every segment is a single point",
+        }
+
+    return segments, {
+        "points": len(latlng),
+        "segments": len(segments),
+        "splits": split_count,
+        "truncated": truncated,
+    }
 
 
 def fetch_and_store_summaries(page: int = 1, per_page: int = 200) -> dict[str, Any]:

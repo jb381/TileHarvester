@@ -144,25 +144,31 @@
 
 ## 🔒 Security & Robustness
 
-- [ ] **Validate environment variables more strictly**
+- [x] **Validate environment variables more strictly**
   - `strava_client_id` and `strava_client_secret` are empty strings by default — should fail fast with clear error
-  - Add validation in `Settings` model or `config.py`
+  - Added `Settings.validate_strava_credentials()` with clear error message and link to Strava API settings
+  - Called in `build_auth_url()`, `exchange_code()`, and `_refresh_if_needed()` (which covers all API calls via `_headers()`)
+  - Removed redundant manual check from `cli.py auth` command
 
-- [ ] **Add request retries for Strava API**
-  - `httpx` client has no retry logic
-  - Network blips or 5xx errors will fail permanently
-  - Consider `httpx` transport with retries or wrap calls in retry decorator
+- [x] **Add request retries for Strava API**
+  - `httpx` client had no retry logic — network blips or 5xx errors would fail permanently
+  - Added `_request_with_retry()` wrapper with exponential backoff (1s, 2s, 4s) for up to 3 retries
+  - Retries on: 5xx server errors, network errors, timeouts
+  - Does NOT retry on: 4xx client errors (including 429 rate limits)
+  - All API functions (`exchange_code`, `_refresh_if_needed`, `get_athlete`, `get_activities`, `get_activity`, `get_activity_streams`, `update_activity_description`, `get_rate_limit_status`) now use `_request_with_retry()`
 
-- [ ] **Sanitize SQL inputs**
-  - Most queries use parameterized statements (good!)
-  - Audit any string interpolation in SQL (e.g., `IGNORED_SPORTS` placeholders)
-  - Ensure `tile_id` values are safe before inserting
+- [x] **Sanitize SQL inputs**
+  - Audited all SQL string interpolation — all safe (hardcoded table names or parameterized `IN` clause placeholders)
+  - Added `validate_tile_id()` in `tile_engine.py` with regex format check (`zoom:x:y` or `x:y`)
+  - Called from `_tile_id()` and `_meters_to_tile()` so all tile_ids produced by the engine are validated before storage
+  - Raises `ValueError` on invalid format as defense-in-depth
 
-- [ ] **Handle edge cases in GPS stream cleaning**
-  - Empty streams
-  - Single-point streams
-  - All points filtered out by speed/distance checks
-  - Very long activities with thousands of points
+- [x] **Handle edge cases in GPS stream cleaning**
+  - Empty streams — already handled (returns empty segments, `_store_activity_tiles` marks as `skipped_no_gps`)
+  - Single-point streams — already handled (becomes a single-point segment)
+  - All points filtered out by speed/distance checks — added `all(len(seg) <= 1 for seg in segments)` check that returns empty segments with warning
+  - Very long activities (>50,000 points) — added `stream_max_points` config (default 50K), truncates with warning
+  - Both cases include `truncated` and `warning` fields in returned stats dict
 
 ## ✨ Polish
 

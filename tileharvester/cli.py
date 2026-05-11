@@ -85,19 +85,19 @@ def auth(
     open_browser: bool = typer.Option(True, help="Open browser for auth"),
 ) -> None:
     """Authenticate with Strava."""
-    if not settings.strava_client_id or not settings.strava_client_secret:
-        typer.echo("Error: Set TH_STRAVA_CLIENT_ID and TH_STRAVA_CLIENT_SECRET")
-        raise typer.Exit(1)
-
-    if is_authenticated():
+    if is_authenticated() and not code:
         typer.echo(
             "Already authenticated. Use auth --code <new-code> to re-authenticate if needed."
         )
         return
 
-    url = build_auth_url()
-
     if not code:
+        try:
+            url = build_auth_url()
+        except Exception as e:
+            typer.echo(f"Authentication failed: {classify_strava_error(e)}")
+            raise typer.Exit(1) from e
+
         typer.echo(f"Open this URL in your browser:\n{url}")
         if open_browser:
             webbrowser.open(url)

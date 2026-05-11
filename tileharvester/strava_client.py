@@ -2,8 +2,10 @@
 
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -11,6 +13,45 @@ from tileharvester.config import settings
 
 TOKEN_URL = "https://www.strava.com/oauth/token"
 API_BASE = "https://www.strava.com/api/v3"
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE = 1.0  # seconds, doubles each retry
+
+
+def _request_with_retry(
+    request_fn: Callable[[], httpx.Response],
+    description: str = "API request",
+) -> httpx.Response:
+    """Execute an httpx request with exponential backoff retry for transient failures.
+
+    Retries on: 5xx server errors, network errors, timeouts.
+    Does NOT retry on: 4xx client errors (including 429 rate limits).
+    """
+    last_error: Exception | None = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            response = request_fn()
+            if response.status_code >= 500:
+                response.read()  # consume body before raising
+                raise httpx.HTTPStatusError(
+                    f"Server error: {response.status_code}",
+                    request=response.request,
+                    response=response,
+                )
+            response.raise_for_status()
+            return response
+        except (httpx.HTTPStatusError, httpx.TransportError) as e:
+            last_error = e
+            if isinstance(e, httpx.HTTPStatusError) and e.response.status_code < 500:
+                raise
+            if attempt < MAX_RETRIES:
+                delay = RETRY_BACKOFF_BASE * (2**attempt)
+                print(
+                    f"Retry {attempt + 1}/{MAX_RETRIES} for {description} after {delay:.0f}s: {e}"
+                )
+                time.sleep(delay)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError(f"{description} failed without an error")
 
 
 class StravaError(Exception):
@@ -126,27 +167,33 @@ def _load_tokens() -> dict[str, Any] | None:
 
 
 def build_auth_url() -> str:
+    settings.validate_strava_credentials()
     scopes = "activity:read_all,activity:write"
-    return (
-        f"https://www.strava.com/oauth/authorize"
-        f"?client_id={settings.strava_client_id}"
-        f"&redirect_uri={settings.strava_redirect_uri}"
-        f"&response_type=code"
-        f"&scope={scopes}"
+    query = urlencode(
+        {
+            "client_id": settings.strava_client_id,
+            "redirect_uri": settings.strava_redirect_uri,
+            "response_type": "code",
+            "scope": scopes,
+        }
     )
+    return f"https://www.strava.com/oauth/authorize?{query}"
 
 
 def exchange_code(code: str) -> dict[str, Any]:
-    resp = httpx.post(
-        TOKEN_URL,
-        data={
-            "client_id": settings.strava_client_id,
-            "client_secret": settings.strava_client_secret,
-            "code": code,
-            "grant_type": "authorization_code",
-        },
+    settings.validate_strava_credentials()
+    resp = _request_with_retry(
+        lambda: httpx.post(
+            TOKEN_URL,
+            data={
+                "client_id": settings.strava_client_id,
+                "client_secret": settings.strava_client_secret,
+                "code": code,
+                "grant_type": "authorization_code",
+            },
+        ),
+        description="Token exchange",
     )
-    resp.raise_for_status()
     data: dict[str, Any] = resp.json()
     data["expires_at"] = int(time.time()) + data.get("expires_in", 21600)
     _save_tokens(data)
@@ -154,21 +201,25 @@ def exchange_code(code: str) -> dict[str, Any]:
 
 
 def _refresh_if_needed() -> dict[str, Any]:
+    settings.validate_strava_credentials()
     tokens = _load_tokens()
     if tokens is None:
         raise RuntimeError("Not authenticated. Run 'tileharvester auth' first.")
 
     if tokens.get("expires_at", 0) < time.time() + 300:
-        resp = httpx.post(
-            TOKEN_URL,
-            data={
-                "client_id": settings.strava_client_id,
-                "client_secret": settings.strava_client_secret,
-                "refresh_token": tokens["refresh_token"],
-                "grant_type": "refresh_token",
-            },
+        refresh_token = tokens["refresh_token"]
+        resp = _request_with_retry(
+            lambda: httpx.post(
+                TOKEN_URL,
+                data={
+                    "client_id": settings.strava_client_id,
+                    "client_secret": settings.strava_client_secret,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                },
+            ),
+            description="Token refresh",
         )
-        resp.raise_for_status()
         data = resp.json()
         data["expires_at"] = int(time.time()) + data.get("expires_in", 21600)
         _save_tokens(data)
@@ -197,8 +248,10 @@ def _rate_limit_sleep(response: httpx.Response) -> None:
 
 
 def get_athlete() -> dict[str, Any]:
-    resp = httpx.get(f"{API_BASE}/athlete", headers=_headers())
-    resp.raise_for_status()
+    resp = _request_with_retry(
+        lambda: httpx.get(f"{API_BASE}/athlete", headers=_headers()),
+        description="get athlete",
+    )
     _rate_limit_sleep(resp)
     return resp.json()  # type: ignore[no-any-return]
 
@@ -211,41 +264,49 @@ def get_activities(
         params["after"] = after
     if before is not None:
         params["before"] = before
-    resp = httpx.get(
-        f"{API_BASE}/athlete/activities", headers=_headers(), params=params, timeout=30
+    resp = _request_with_retry(
+        lambda: httpx.get(
+            f"{API_BASE}/athlete/activities", headers=_headers(), params=params, timeout=30
+        ),
+        description="get activities",
     )
-    resp.raise_for_status()
     _rate_limit_sleep(resp)
     return resp.json()  # type: ignore[no-any-return]
 
 
 def get_activity(activity_id: int) -> dict[str, Any]:
-    resp = httpx.get(f"{API_BASE}/activities/{activity_id}", headers=_headers(), timeout=30)
-    resp.raise_for_status()
+    resp = _request_with_retry(
+        lambda: httpx.get(f"{API_BASE}/activities/{activity_id}", headers=_headers(), timeout=30),
+        description=f"get activity {activity_id}",
+    )
     _rate_limit_sleep(resp)
     return resp.json()  # type: ignore[no-any-return]
 
 
 def get_activity_streams(activity_id: int, keys: str = "latlng") -> dict[str, Any]:
-    resp = httpx.get(
-        f"{API_BASE}/activities/{activity_id}/streams",
-        headers=_headers(),
-        params={"keys": keys, "key_by_type": "true"},
-        timeout=60,
+    resp = _request_with_retry(
+        lambda: httpx.get(
+            f"{API_BASE}/activities/{activity_id}/streams",
+            headers=_headers(),
+            params={"keys": keys, "key_by_type": "true"},
+            timeout=60,
+        ),
+        description=f"get streams for activity {activity_id}",
     )
-    resp.raise_for_status()
     _rate_limit_sleep(resp)
     return resp.json()  # type: ignore[no-any-return]
 
 
 def update_activity_description(activity_id: int, description: str) -> dict[str, Any]:
-    resp = httpx.put(
-        f"{API_BASE}/activities/{activity_id}",
-        headers=_headers(),
-        json={"description": description},
-        timeout=30,
+    resp = _request_with_retry(
+        lambda: httpx.put(
+            f"{API_BASE}/activities/{activity_id}",
+            headers=_headers(),
+            json={"description": description},
+            timeout=30,
+        ),
+        description=f"update description for activity {activity_id}",
     )
-    resp.raise_for_status()
     _rate_limit_sleep(resp)
     return resp.json()  # type: ignore[no-any-return]
 
@@ -257,13 +318,15 @@ def is_authenticated() -> bool:
 def get_rate_limit_status() -> dict[str, Any]:
     """Check Strava API rate limit status with a lightweight request."""
     try:
-        resp = httpx.get(
-            f"{API_BASE}/athlete",
-            headers=_headers(),
-            timeout=15,
+        resp = _request_with_retry(
+            lambda: httpx.get(
+                f"{API_BASE}/athlete",
+                headers=_headers(),
+                timeout=15,
+            ),
+            description="rate limit status check",
         )
         rate_limit = _parse_rate_limit_headers(resp.headers)
-        resp.raise_for_status()
         return {
             "ok": True,
             "status_code": resp.status_code,

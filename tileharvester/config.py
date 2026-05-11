@@ -19,6 +19,16 @@ class Settings(BaseSettings):
 
     strava_client_id: str = ""
     strava_client_secret: str = ""
+
+    def validate_strava_credentials(self) -> None:
+        if not self.strava_client_id.strip() or not self.strava_client_secret.strip():
+            raise RuntimeError(
+                "Strava credentials not configured. "
+                "Set TH_STRAVA_CLIENT_ID and TH_STRAVA_CLIENT_SECRET "
+                "environment variables or add them to your .env file. "
+                "Get your API credentials at https://www.strava.com/settings/api"
+            )
+
     strava_redirect_uri: str = "http://localhost:8000/callback"
 
     # Squadrats uses Mapbox/XYZ tile cells: z14 for Squadrats, z17 for Squadratinhos.
@@ -37,6 +47,7 @@ class Settings(BaseSettings):
     stream_max_time_gap_seconds: int = 60
     stream_max_speed_mps: float = 35.0
     stream_gap_min_meters: float = 50.0
+    stream_max_points: int = 50_000
 
     @property
     def ignored_sports(self) -> set[str]:

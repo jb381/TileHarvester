@@ -1,6 +1,7 @@
 """Tile engine for Squadrats-compatible Mapbox tile computation."""
 
 import math
+import re
 from typing import Any, Protocol
 
 from tileharvester.config import settings
@@ -9,6 +10,20 @@ from tileharvester.config import settings
 EARTH_RADIUS = 6378137.0  # meters
 MAX_EXTENT = math.pi * EARTH_RADIUS  # half the world width in meters
 MAX_LATITUDE = 85.05112878
+
+_TILE_ID_RE = re.compile(r"^\d+:\d+:\d+$")
+_ZOOM_TILE_ID_RE = re.compile(r"^\d+:\d+$")
+
+
+def validate_tile_id(tile_id: str) -> str:
+    """Validate and return a tile_id string.
+
+    Accepts both formats: ``zoom:x:y`` and ``x:y``.
+    Raises ValueError if the format is invalid.
+    """
+    if _TILE_ID_RE.match(tile_id) or _ZOOM_TILE_ID_RE.match(tile_id):
+        return tile_id
+    raise ValueError(f"Invalid tile_id format: {tile_id!r}")
 
 
 def _latlon_to_meters(lat: float, lon: float) -> tuple[float, float]:
@@ -22,7 +37,7 @@ def _meters_to_tile(x: float, y: float, tile_size: float) -> str:
     """Convert mercator meters to tile id string."""
     tx = math.floor((x + MAX_EXTENT) / tile_size)
     ty = math.floor((y + MAX_EXTENT) / tile_size)
-    return f"{tx}:{ty}"
+    return validate_tile_id(f"{tx}:{ty}")
 
 
 class TileEngine(Protocol):
@@ -54,7 +69,7 @@ class SquadratsEngine:
         n = 2**zoom
         x = min(max(x, 0), n - 1)
         y = min(max(y, 0), n - 1)
-        return f"{zoom}:{x}:{y}"
+        return validate_tile_id(f"{zoom}:{x}:{y}")
 
     def _tiles_for_segment(
         self, start: tuple[float, float], end: tuple[float, float], zoom: int
