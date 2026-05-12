@@ -419,7 +419,7 @@ def _store_activity_tiles(
                 len(squadratinhos),
                 len(new_squadrats),
                 len(new_squadratinhos),
-                datetime.utcnow().isoformat(),
+                datetime.utcnow().isoformat(),  # noqa: UP017
                 engine.id,
                 source,
                 activity_id,
@@ -445,8 +445,22 @@ def compute_activity_tiles(activity_id: int) -> dict[str, Any]:
         raise ValueError(f"Activity {activity_id} not found")
 
     if not row["has_gps"]:
-        _set_activity_status(activity_id, "skipped_no_gps")
-        return {"status": "skipped_no_gps", "activity_id": activity_id, "source": "streams_clean"}
+        # Activity has no summary polyline — try fetching the full GPS stream
+        try:
+            streams = get_activity_streams(activity_id, keys="latlng,time")
+        except Exception as e:
+            error_msg = str(classify_strava_error(e))
+            _set_activity_status(activity_id, "failed", error_msg)
+            return {"status": "failed", "activity_id": activity_id, "error": error_msg}
+
+        segments, stream_stats = clean_stream_segments(streams)
+        if not any(segments):
+            _set_activity_status(activity_id, "skipped_no_gps")
+            return {"status": "skipped_no_gps", "activity_id": activity_id, "source": "streams_clean"}
+
+        result = _store_activity_tiles(row, [], "streams_clean", segments=segments)
+        result.update(stream_stats)
+        return result
 
     try:
         streams = get_activity_streams(activity_id, keys="latlng,time")
@@ -470,14 +484,6 @@ def compute_activity_tiles_from_summary(activity_id: int) -> dict[str, Any]:
     row = _activity_row(activity_id)
     if row is None:
         raise ValueError(f"Activity {activity_id} not found")
-
-    if not row["has_gps"]:
-        _set_activity_status(activity_id, "skipped_no_gps")
-        return {
-            "status": "skipped_no_gps",
-            "activity_id": activity_id,
-            "source": "summary_polyline",
-        }
 
     summary = row["summary_polyline"]
     if summary:
@@ -542,7 +548,7 @@ def compute_total_unique_squadrats_through(activity_id: int, start_local: str) -
 
 def sync_once() -> dict[str, Any]:
     """Incremental sync: fetch recent, compute tiles, annotate new activities."""
-    after = int((datetime.utcnow() - timedelta(days=settings.sync_lookback_days)).timestamp())
+    after = int((datetime.utcnow() - timedelta(days=settings.sync_lookback_days)).timestamp())  # noqa: UP017
     activities = get_activities(per_page=50, after=after)
 
     new_count = 0
@@ -625,7 +631,7 @@ def sync_once() -> dict[str, Any]:
 
     # Annotate only recent unannotated activities (not old ones)
     annotation_cutoff = (
-        datetime.utcnow() - timedelta(days=settings.sync_annotation_window_days)
+        datetime.utcnow() - timedelta(days=settings.sync_annotation_window_days)  # noqa: UP017
     ).isoformat()
     with get_db() as conn:
         rows = conn.execute(

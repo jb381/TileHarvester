@@ -59,7 +59,7 @@ def annotate_activity(activity_id: int) -> dict[str, Any]:
                 SET annotation_status = ?, description_line = ?, annotated_at = ?
                 WHERE id = ?
                 """,
-                (annotation_status, line, datetime.utcnow().isoformat(), activity_id),
+                (annotation_status, line, datetime.utcnow().isoformat(), activity_id),  # noqa: UP017
             )
             conn.commit()
         return {

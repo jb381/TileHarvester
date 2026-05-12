@@ -7,6 +7,24 @@ from tileharvester.descriptions import (
 )
 
 
+import pytest
+
+
+@pytest.fixture
+def temp_settings():
+    from tileharvester.config import Settings
+
+    return Settings(
+        db_path=":memory:",
+        data_dir="/tmp",
+        description_emoji="🗺️",
+        description_prefix="TileHarvester",
+        squadrat_offset=0,
+        squadrat_zoom=14,
+        squadratinho_zoom=17,
+    )
+
+
 def test_append_to_empty():
     result = update_description_line("", "🗺️ TileHarvester: +5 new Squadrats")
     assert result == "🗺️ TileHarvester: +5 new Squadrats"

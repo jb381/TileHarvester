@@ -76,6 +76,34 @@ class SquadratsEngine:
     ) -> set[str]:
         x0, y0 = start
         x1, y1 = end
+        n = 2**zoom
+
+        # --- Antimeridian crossing detection ---
+        # If the x-coordinate delta exceeds half the world width, the segment
+        # crosses the ±180° line the short way. Split into two sub-segments
+        # that don't cross the boundary.
+        if abs(x1 - x0) > n / 2:
+            epsilon = 1e-10
+            if x0 < x1:
+                # Crossing through x=0 (westward wrap): (x0,y0) → 0, then n → x1
+                frac = x0 / (x0 + (n - x1)) if (x0 + (n - x1)) else 0.0
+                y_mid = y0 + frac * (y1 - y0)
+                tiles: set[str] = set()
+                tiles.update(self._tiles_for_segment(start, (epsilon, y_mid), zoom))
+                tiles.update(
+                    self._tiles_for_segment((float(n), y_mid), end, zoom)
+                )
+            else:
+                # Crossing through x=n (eastward wrap): (x0,y0) → n, then 0 → x1
+                frac = (n - x0) / ((n - x0) + x1) if ((n - x0) + x1) else 0.0
+                y_mid = y0 + frac * (y1 - y0)
+                tiles = set()
+                tiles.update(
+                    self._tiles_for_segment(start, (float(n - epsilon), y_mid), zoom)
+                )
+                tiles.update(self._tiles_for_segment((0.0, y_mid), end, zoom))
+            return tiles
+
         tx = math.floor(x0)
         ty = math.floor(y0)
         end_tx = math.floor(x1)

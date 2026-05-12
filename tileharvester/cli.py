@@ -256,15 +256,8 @@ def status() -> None:
         stale = conn.execute(
             """
             SELECT COUNT(*) FROM activities
-            WHERE annotation_status = 'done'
-              AND processed_at IS NOT NULL
-              AND id IN (
-                  SELECT id FROM activities
-                  WHERE start_local < (SELECT MAX(start_local) FROM activities WHERE status = 'processed')
-              )
-              AND new_squadrat_count != (
-                  SELECT new_squadrat_count FROM activities a2 WHERE a2.id = activities.id
-              )
+            WHERE status = 'processed'
+              AND (annotation_status IS NULL OR annotation_status = 'none')
             """
         ).fetchone()[0]
 
