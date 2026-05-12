@@ -620,7 +620,7 @@ def sync_once() -> dict[str, Any]:
     # Process all pending (tile computation)
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id FROM activities WHERE status = 'pending' AND has_gps = 1 ORDER BY start_local"
+            "SELECT id FROM activities WHERE status = 'pending' ORDER BY start_local"
         ).fetchall()
 
     processed = 0
