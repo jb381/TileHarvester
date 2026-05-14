@@ -1,10 +1,25 @@
 """Tests for description line manipulation."""
 
+import pytest
+
+from tileharvester.config import Settings
 from tileharvester.descriptions import (
     has_description_line,
     remove_description_line,
     update_description_line,
 )
+
+
+@pytest.fixture
+def temp_settings(tmp_path):
+    return Settings(
+        data_dir=tmp_path,
+        description_emoji="🗺️",
+        description_prefix="TileHarvester",
+        squadrat_offset=0,
+        squadrat_zoom=14,
+        squadratinho_zoom=17,
+    )
 
 
 def test_append_to_empty():

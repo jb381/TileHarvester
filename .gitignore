@@ -21,3 +21,5 @@ build/
 *.swp
 *.swo
 *~
+findings.md
+.codex
