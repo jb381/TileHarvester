@@ -48,10 +48,10 @@ def _is_ignored_sport(sport_type: str | None) -> bool:
     return bool(sport_type and sport_type in settings.ignored_sports)
 
 
-def _pending_status(has_gps: bool, sport_type: str | None) -> str:
+def _pending_status(_has_gps: bool, sport_type: str | None) -> str:
     if _is_ignored_sport(sport_type):
         return "skipped_ignored_sport"
-    return "pending" if has_gps else "skipped_no_gps"
+    return "pending"
 
 
 def _distance_meters(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -197,12 +197,6 @@ def fetch_and_store_summaries(page: int = 1, per_page: int = 200) -> dict[str, A
                         (sport_type, aid),
                     )
                     ignored += cur.rowcount
-                elif existing["status"] == "pending" and not existing["has_gps"]:
-                    cur = conn.execute(
-                        "UPDATE activities SET status = 'skipped_no_gps' WHERE id = ?",
-                        (aid,),
-                    )
-                    skipped += cur.rowcount
                 continue
             conn.execute(
                 """
@@ -224,8 +218,6 @@ def fetch_and_store_summaries(page: int = 1, per_page: int = 200) -> dict[str, A
             )
             if status == "skipped_ignored_sport":
                 ignored += 1
-            elif not has_gps:
-                skipped += 1
             stored += 1
         conn.commit()
     return {
@@ -456,7 +448,11 @@ def compute_activity_tiles(activity_id: int) -> dict[str, Any]:
         segments, stream_stats = clean_stream_segments(streams)
         if not any(segments):
             _set_activity_status(activity_id, "skipped_no_gps")
-            return {"status": "skipped_no_gps", "activity_id": activity_id, "source": "streams_clean"}
+            return {
+                "status": "skipped_no_gps",
+                "activity_id": activity_id,
+                "source": "streams_clean",
+            }
 
         result = _store_activity_tiles(row, [], "streams_clean", segments=segments)
         result.update(stream_stats)
@@ -588,12 +584,6 @@ def sync_once() -> dict[str, Any]:
                         "UPDATE activities SET sport_type = ?, status = 'skipped_ignored_sport' WHERE id = ?",
                         (sport_type, aid),
                     )
-                elif existing["status"] == "pending" and not existing["has_gps"]:
-                    cur = conn.execute(
-                        "UPDATE activities SET status = 'skipped_no_gps' WHERE id = ?",
-                        (aid,),
-                    )
-                    skipped += cur.rowcount
                 continue
             if not existing:
                 conn.execute(

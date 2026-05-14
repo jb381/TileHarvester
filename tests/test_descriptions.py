@@ -1,5 +1,8 @@
 """Tests for description line manipulation."""
 
+import pytest
+
+from tileharvester.config import Settings
 from tileharvester.descriptions import (
     has_description_line,
     remove_description_line,
@@ -7,16 +10,10 @@ from tileharvester.descriptions import (
 )
 
 
-import pytest
-
-
 @pytest.fixture
-def temp_settings():
-    from tileharvester.config import Settings
-
+def temp_settings(tmp_path):
     return Settings(
-        db_path=":memory:",
-        data_dir="/tmp",
+        data_dir=tmp_path,
         description_emoji="🗺️",
         description_prefix="TileHarvester",
         squadrat_offset=0,

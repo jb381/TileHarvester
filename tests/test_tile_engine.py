@@ -30,3 +30,15 @@ def test_tile_size_ratio():
     assert len(squadrats) > 1
     assert len(squadratinhos) >= len(squadrats)
     assert len(squadratinhos) <= len(squadrats) * 12
+
+
+def test_antimeridian_crossing_uses_short_path():
+    engine = SquadratsEngine(squadrat_zoom=14, squadratinho_zoom=17)
+    points = [(0.0, 179.9), (0.0, -179.9)]
+
+    squadrats, squadratinhos = engine.tiles_for_points(points)
+
+    assert len(squadrats) < 100
+    assert len(squadratinhos) < 500
+    assert any(tile.startswith("14:0:") for tile in squadrats)
+    assert any(tile.startswith("14:16383:") for tile in squadrats)

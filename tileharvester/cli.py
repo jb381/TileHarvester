@@ -253,7 +253,7 @@ def status() -> None:
         annotation_failed = conn.execute(
             "SELECT COUNT(*) FROM activities WHERE annotation_status = 'failed'"
         ).fetchone()[0]
-        stale = conn.execute(
+        unannotated_processed = conn.execute(
             """
             SELECT COUNT(*) FROM activities
             WHERE status = 'processed'
@@ -281,7 +281,7 @@ def status() -> None:
     typer.echo(f"Needs stream refinement:   {needs_refinement}")
     typer.echo(f"Annotated:                 {annotated}")
     typer.echo(f"Annotation failed:         {annotation_failed}")
-    typer.echo(f"Stale annotations:         {stale}")
+    typer.echo(f"Unannotated processed:     {unannotated_processed}")
     typer.echo(f"Total unique Squadrats:    {total_squadrats}")
     typer.echo(f"Total unique Squadratinhos: {total_squadratinhos}")
 
