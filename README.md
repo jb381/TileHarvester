@@ -12,6 +12,8 @@ Every new activity gets a little line in the description:
 🗺️ TileHarvester: 1,234 Squadrats · +13 new · +653/mo · +10/wk
 ```
 
+![TileHarvester Strava description example](assets/tileharvester-strava-example.png)
+
 Your friends will know you're grinding tiles 🚴‍♂️🏃‍♀️
 
 ## Quick start (UV)
