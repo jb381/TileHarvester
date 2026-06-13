@@ -78,18 +78,15 @@ MIGRATIONS = [
     """
     ALTER TABLE activities ADD COLUMN tile_source TEXT;
     """,
-    """
-    PRAGMA journal_mode=WAL;
-    """,
 ]
 
 
 def get_db() -> sqlite3.Connection:
     settings.ensure_dirs()
-    conn = sqlite3.connect(str(settings.db_path))
+    conn = sqlite3.connect(str(settings.db_path), timeout=5.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
