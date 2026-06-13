@@ -94,7 +94,7 @@ def auth(
     if not code:
         try:
             url = build_auth_url()
-        except Exception as e:
+        except (Exception, BaseException) as e:
             typer.echo(f"Authentication failed: {classify_strava_error(e)}")
             raise typer.Exit(1) from e
 
@@ -114,7 +114,7 @@ def auth(
     try:
         tokens = exchange_code(code)
         typer.echo(f"Authenticated successfully. Athlete ID: {tokens.get('athlete', {}).get('id')}")
-    except Exception as e:
+    except (Exception, BaseException) as e:
         typer.echo(f"Authentication failed: {classify_strava_error(e)}")
         raise typer.Exit(1) from e
 
@@ -132,7 +132,7 @@ def backfill(
     try:
         result = run_backfill(limit=limit)
         typer.echo(f"Backfill complete: {result['stored']} stored, {result['processed']} processed")
-    except Exception as e:
+    except (Exception, BaseException) as e:
         typer.echo(f"Backfill failed: {classify_strava_error(e)}")
         raise typer.Exit(1) from e
 
@@ -160,7 +160,7 @@ def sync(
             typer.echo(
                 f"Sync complete: {result['new_activities']} new, {result['processed']} processed, {result['annotated']} annotated"
             )
-        except Exception as e:
+        except (Exception, BaseException) as e:
             typer.echo(f"Sync failed: {classify_strava_error(e)}")
             raise typer.Exit(1) from e
     else:
@@ -190,7 +190,7 @@ def retry() -> None:
     try:
         result = retry_failed()
         typer.echo(f"Retried {result['retried']}, succeeded {result['success']}")
-    except Exception as e:
+    except (Exception, BaseException) as e:
         typer.echo(f"Retry failed: {classify_strava_error(e)}")
         raise typer.Exit(1) from e
 
@@ -216,7 +216,7 @@ def refine(
             f"Refine complete: {result['refined']}/{result['selected']} refined, "
             f"{result['failed']} failed, {result['splits']} GPS gaps split, {result['rebuilt']} rebuilt"
         )
-    except Exception as e:
+    except (Exception, BaseException) as e:
         typer.echo(f"Refine failed: {classify_strava_error(e)}")
         raise typer.Exit(1) from e
 
@@ -362,7 +362,7 @@ def validate(
     typer.echo(f"Fetching activity {activity_id} GPS stream...")
     try:
         streams = get_activity_streams(activity_id, keys="latlng,time")
-    except Exception as e:
+    except (Exception, BaseException) as e:
         typer.echo(f"Failed: {classify_strava_error(e)}")
         raise typer.Exit(1) from e
 
@@ -502,7 +502,7 @@ def service(
     elif action == "install":
         try:
             install_service(python=python, interval=interval)
-        except Exception as e:
+        except (Exception, BaseException) as e:
             typer.echo(f"Install failed (may need sudo): {e}")
             raise typer.Exit(1) from e
     else:

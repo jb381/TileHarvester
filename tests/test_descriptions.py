@@ -2,7 +2,6 @@
 
 import pytest
 
-from tileharvester.config import Settings
 from tileharvester.descriptions import (
     has_description_line,
     remove_description_line,
@@ -11,9 +10,12 @@ from tileharvester.descriptions import (
 
 
 @pytest.fixture
-def temp_settings(tmp_path):
+def temp_settings():
+    from tileharvester.config import Settings
+
     return Settings(
-        data_dir=tmp_path,
+        db_path=":memory:",
+        data_dir="/tmp",
         description_emoji="🗺️",
         description_prefix="TileHarvester",
         squadrat_offset=0,
