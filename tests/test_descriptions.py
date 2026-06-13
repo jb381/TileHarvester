@@ -1,13 +1,12 @@
 """Tests for description line manipulation."""
 
+import pytest
+
 from tileharvester.descriptions import (
     has_description_line,
     remove_description_line,
     update_description_line,
 )
-
-
-import pytest
 
 
 @pytest.fixture
