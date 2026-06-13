@@ -90,17 +90,13 @@ class SquadratsEngine:
                 y_mid = y0 + frac * (y1 - y0)
                 tiles: set[str] = set()
                 tiles.update(self._tiles_for_segment(start, (epsilon, y_mid), zoom))
-                tiles.update(
-                    self._tiles_for_segment((float(n), y_mid), end, zoom)
-                )
+                tiles.update(self._tiles_for_segment((float(n), y_mid), end, zoom))
             else:
                 # Crossing through x=n (eastward wrap): (x0,y0) → n, then 0 → x1
                 frac = (n - x0) / ((n - x0) + x1) if ((n - x0) + x1) else 0.0
                 y_mid = y0 + frac * (y1 - y0)
                 tiles = set()
-                tiles.update(
-                    self._tiles_for_segment(start, (float(n - epsilon), y_mid), zoom)
-                )
+                tiles.update(self._tiles_for_segment(start, (float(n - epsilon), y_mid), zoom))
                 tiles.update(self._tiles_for_segment((0.0, y_mid), end, zoom))
             return tiles
 

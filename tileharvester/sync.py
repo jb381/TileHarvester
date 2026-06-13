@@ -531,7 +531,9 @@ def compute_total_unique_squadrats_through(activity_id: int, start_local: str) -
 
 def sync_once() -> dict[str, Any]:
     """Incremental sync: fetch recent, compute tiles, annotate new activities."""
-    after = int((datetime.now(tz=timezone.utc) - timedelta(days=settings.sync_lookback_days)).timestamp())
+    after = int(
+        (datetime.now(tz=timezone.utc) - timedelta(days=settings.sync_lookback_days)).timestamp()
+    )
     activities = get_activities(per_page=50, after=after)
 
     new_count = 0
