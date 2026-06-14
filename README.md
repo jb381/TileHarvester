@@ -20,21 +20,11 @@ Your friends will know you're grinding tiles 🚴‍♂️🏃‍♀️
 
 ```bash
 # 1. grab it
-git clone https://github.com/jb381/TileHarvester.git && cd tileharvester
-uv sync
+git clone https://github.com/jb381/TileHarvester.git && \
+    cd TileHarvester && \
+    chmod u+x quick_start_uv.sh && \
+    ./quick_start_uv.sh
 
-# 2. grab Strava creds → https://www.strava.com/settings/api
-export TH_STRAVA_CLIENT_ID="your-id"
-export TH_STRAVA_CLIENT_SECRET="your-secret"
-
-# 3. log in
-uv run tileharvester auth
-
-# 4. build your history
-uv run tileharvester backfill
-
-# 5. test it
-uv run tileharvester sync --once
 ```
 
 Then either leave `uv run tileharvester sync` running, or use Docker/systemd for fire-and-forget.
