@@ -46,3 +46,8 @@ jobs:
         run: uv sync --group dev
       - name: Run tests (excluding e2e)
         run: uv run pytest -m "not e2e" --ignore=tests/e2e --ignore=test_e2e.py -v
+
+      - name: Audit dependencies for CVEs
+        uses: pypa/gh-action-pip-audit@v1.1.0
+        with:
+          inputs: uv.lock

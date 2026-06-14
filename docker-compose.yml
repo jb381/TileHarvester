@@ -40,6 +40,14 @@ services:
     restart: unless-stopped
     profiles:
       - cron
+    labels:
+      homepage.group: Infrastructure
+      homepage.name: TileHarvester
+      homepage.icon: si-strava-#fc4c02
+      homepage.href: ${HOMEPAGE_HREF_TILEHARVESTER:-http://localhost:8042/api/tileharvester}
+      homepage.description: Strava activity sync (cron)
+      homepage.weight: "500"
+      homepage.showStats: "true"
 
 volumes:
   tileharvester-data:
