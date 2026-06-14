@@ -101,7 +101,7 @@ def auth(
         typer.echo(f"Open this URL in your browser:\n{url}")
         if open_browser:
             webbrowser.open(url)
-        raw = typer.prompt("Paste the callback URL or authorization code")
+        raw = typer.prompt("Paste the callback URL or authorization code. Even if your browser shows an errorpage, the URL will contain the code needed to complete authentication.")
         code = _extract_code(raw)
 
     # Also handle case where user passed --code with a full URL
