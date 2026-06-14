@@ -49,6 +49,6 @@ jobs:
 
       - name: Audit dependencies for CVEs
         run: |
-          uv export --frozen --no-dev --output-file=/tmp/requirements.txt
+          uv export --frozen --no-dev --no-emit-project --output-file=/tmp/requirements.txt
           uv pip install pip-audit
           uv run pip-audit -r /tmp/requirements.txt
