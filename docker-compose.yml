@@ -1,10 +1,11 @@
 services:
   tileharvester:
     build: .
+    restart: always
     image: tileharvester:latest
     container_name: tileharvester
     volumes:
-      - tileharvester-data:/data
+      - ./tileharvester-data:/data
       - ./.env:/app/.env:ro
     environment:
       - TH_DATA_DIR=/data
@@ -25,10 +26,11 @@ services:
   # Background sync — runs tileharvester sync in a loop
   tileharvester-cron:
     build: .
+    restart: always
     image: tileharvester:latest
     container_name: tileharvester-cron
     volumes:
-      - tileharvester-data:/data
+      - ./tileharvester-data:/data
       - ./.env:/app/.env:ro
     environment:
       - TH_DATA_DIR=/data
@@ -37,10 +39,6 @@ services:
       - TH_POLL_INTERVAL_MINUTES=${TH_POLL_INTERVAL_MINUTES:-5}
       - TH_SQUADRAT_OFFSET=${TH_SQUADRAT_OFFSET:-0}
     command: ["sync"]
-    restart: unless-stopped
     profiles:
       - cron
 
-volumes:
-  tileharvester-data:
-    driver: local
