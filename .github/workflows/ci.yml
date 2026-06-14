@@ -46,3 +46,9 @@ jobs:
         run: uv sync --group dev
       - name: Run tests (excluding e2e)
         run: uv run pytest -m "not e2e" --ignore=tests/e2e --ignore=test_e2e.py -v
+
+      - name: Audit dependencies for CVEs
+        run: |
+          uv export --frozen --no-dev --no-emit-project --output-file=/tmp/requirements.txt
+          uv pip install pip-audit
+          uv run pip-audit -r /tmp/requirements.txt || echo "⚠️ See above for CVEs — Dependabot will update these"
