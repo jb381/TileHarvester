@@ -40,7 +40,6 @@ class Settings(BaseSettings):
     sync_lookback_days: int = 7
     sync_annotation_window_days: int = 1
     refine_default_limit: int = 80
-    backfill_per_run: int = 100
     rate_limit_buffer: int = 10
     ignored_sport_types: str = "VirtualRide,VirtualRun"
     stream_max_segment_meters: float = 300.0

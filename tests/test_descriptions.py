@@ -14,7 +14,6 @@ def temp_settings():
     from tileharvester.config import Settings
 
     return Settings(
-        db_path=":memory:",
         data_dir="/tmp",
         description_emoji="🗺️",
         description_prefix="TileHarvester",

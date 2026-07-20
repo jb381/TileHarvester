@@ -48,9 +48,6 @@ def annotate_activity(activity_id: int) -> dict[str, Any]:
 
         if new_desc != current_desc:
             update_activity_description(activity_id, new_desc)
-            annotation_status = "updated"
-        else:
-            annotation_status = "skipped"
 
         with get_db() as conn:
             conn.execute(
@@ -59,7 +56,7 @@ def annotate_activity(activity_id: int) -> dict[str, Any]:
                 SET annotation_status = ?, description_line = ?, annotated_at = ?
                 WHERE id = ?
                 """,
-                (annotation_status, line, datetime.now(tz=timezone.utc).isoformat(), activity_id),
+                ("done", line, datetime.now(tz=timezone.utc).isoformat(), activity_id),
             )
             conn.commit()
         return {

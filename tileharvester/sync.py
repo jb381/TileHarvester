@@ -48,10 +48,10 @@ def _is_ignored_sport(sport_type: str | None) -> bool:
     return bool(sport_type and sport_type in settings.ignored_sports)
 
 
-def _pending_status(has_gps: bool, sport_type: str | None) -> str:
+def _pending_status(sport_type: str | None) -> str:
     if _is_ignored_sport(sport_type):
         return "skipped_ignored_sport"
-    return "pending" if has_gps else "skipped_no_gps"
+    return "pending"
 
 
 def _distance_meters(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -151,9 +151,15 @@ def clean_stream_segments(
     }
 
 
-def fetch_and_store_summaries(page: int = 1, per_page: int = 200) -> dict[str, Any]:
+def fetch_and_store_summaries(
+    page: int = 1,
+    per_page: int = 200,
+    max_items: int | None = None,
+) -> dict[str, Any]:
     """Fetch activity summaries and store new ones."""
     activities = get_activities(page=page, per_page=per_page)
+    if max_items is not None:
+        activities = activities[:max_items]
     with get_db() as conn:
         stored = 0
         updated = 0
@@ -164,7 +170,7 @@ def fetch_and_store_summaries(page: int = 1, per_page: int = 200) -> dict[str, A
             summary = _summary_polyline(a)
             sport_type = a.get("sport_type", "")
             has_gps = bool(summary)
-            status = _pending_status(has_gps, sport_type)
+            status = _pending_status(sport_type)
             existing = conn.execute(
                 "SELECT id, status, has_gps FROM activities WHERE id = ?", (aid,)
             ).fetchone()
@@ -197,12 +203,6 @@ def fetch_and_store_summaries(page: int = 1, per_page: int = 200) -> dict[str, A
                         (sport_type, aid),
                     )
                     ignored += cur.rowcount
-                elif existing["status"] == "pending" and not existing["has_gps"]:
-                    cur = conn.execute(
-                        "UPDATE activities SET status = 'skipped_no_gps' WHERE id = ?",
-                        (aid,),
-                    )
-                    skipped += cur.rowcount
                 continue
             conn.execute(
                 """
@@ -224,8 +224,6 @@ def fetch_and_store_summaries(page: int = 1, per_page: int = 200) -> dict[str, A
             )
             if status == "skipped_ignored_sport":
                 ignored += 1
-            elif not has_gps:
-                skipped += 1
             stored += 1
         conn.commit()
     return {
@@ -410,7 +408,8 @@ def _store_activity_tiles(
             UPDATE activities
             SET status = ?, squadrat_count = ?, squadratinho_count = ?,
                 new_squadrat_count = ?, new_squadratinho_count = ?,
-                processed_at = ?, tile_engine = ?, tile_source = ?, last_error = NULL
+                processed_at = ?, tile_engine = ?, tile_source = ?, has_gps = 1,
+                last_error = NULL
             WHERE id = ?
             """,
             (
@@ -529,12 +528,24 @@ def compute_total_unique_squadrats_through(activity_id: int, start_local: str) -
     return int(total)
 
 
+def _fetch_recent_activities(after: int, per_page: int = 200) -> list[dict[str, Any]]:
+    """Fetch every activity after a timestamp, following Strava pagination."""
+    activities: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        batch = get_activities(page=page, per_page=per_page, after=after)
+        activities.extend(batch)
+        if len(batch) < per_page:
+            return activities
+        page += 1
+
+
 def sync_once() -> dict[str, Any]:
     """Incremental sync: fetch recent, compute tiles, annotate new activities."""
     after = int(
         (datetime.now(tz=timezone.utc) - timedelta(days=settings.sync_lookback_days)).timestamp()
     )
-    activities = get_activities(per_page=50, after=after)
+    activities = _fetch_recent_activities(after)
 
     new_count = 0
     skipped = 0
@@ -544,7 +555,7 @@ def sync_once() -> dict[str, Any]:
             summary = _summary_polyline(a)
             sport_type = a.get("sport_type", "")
             has_gps = bool(summary)
-            status = _pending_status(has_gps, sport_type)
+            status = _pending_status(sport_type)
             existing = conn.execute(
                 "SELECT id, status, has_gps FROM activities WHERE id = ?", (aid,)
             ).fetchone()
@@ -573,12 +584,6 @@ def sync_once() -> dict[str, Any]:
                         "UPDATE activities SET sport_type = ?, status = 'skipped_ignored_sport' WHERE id = ?",
                         (sport_type, aid),
                     )
-                elif existing["status"] == "pending" and not existing["has_gps"]:
-                    cur = conn.execute(
-                        "UPDATE activities SET status = 'skipped_no_gps' WHERE id = ?",
-                        (aid,),
-                    )
-                    skipped += cur.rowcount
                 continue
             if not existing:
                 conn.execute(
@@ -613,15 +618,23 @@ def sync_once() -> dict[str, Any]:
         result = compute_activity_tiles(row["id"])
         if result["status"] == "processed":
             processed += 1
+        elif result["status"] == "skipped_no_gps":
+            skipped += 1
 
     # Annotate only recent unannotated activities (not old ones)
     annotation_cutoff = (
-        datetime.now(tz=timezone.utc) - timedelta(days=settings.sync_annotation_window_days)  # noqa: UP017
-    ).isoformat()
+        datetime.now(tz=timezone.utc) - timedelta(days=settings.sync_annotation_window_days)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id FROM activities WHERE status = 'processed' AND (annotation_status IS NULL OR annotation_status = 'none') AND start_local >= ? ORDER BY start_local",
-            (annotation_cutoff,),
+            """
+            SELECT id FROM activities
+            WHERE status = 'processed'
+              AND (annotation_status IS NULL OR annotation_status = 'none')
+              AND (start_utc >= ? OR ?)
+            ORDER BY start_utc, id
+            """,
+            (annotation_cutoff, int(settings.rewrite_existing_annotations)),
         ).fetchall()
 
     annotated = 0

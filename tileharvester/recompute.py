@@ -26,17 +26,14 @@ def recompute_novelty_from_stored_tiles() -> dict[str, Any]:
             WHERE status = 'processed'
             """
         )
-        conn.commit()
-
         rows = conn.execute(
             "SELECT id, start_local FROM activities WHERE status = 'processed' ORDER BY start_local"
         ).fetchall()
 
-    rebuilt = 0
-    for row in rows:
-        aid = row["id"]
-        start_local = row["start_local"]
-        with get_db() as conn:
+        rebuilt = 0
+        for row in rows:
+            aid = row["id"]
+            start_local = row["start_local"]
             squadrats = {
                 r["tile_id"]
                 for r in conn.execute(
@@ -93,8 +90,19 @@ def recompute_novelty_from_stored_tiles() -> dict[str, Any]:
                 "UPDATE activities SET new_squadrat_count = ?, new_squadratinho_count = ? WHERE id = ?",
                 (len(new_squadrats), len(new_squadratinhos), aid),
             )
-            conn.commit()
             rebuilt += 1
+
+        if settings.rewrite_existing_annotations:
+            conn.execute(
+                """
+                UPDATE activities
+                SET annotation_status = 'none'
+                WHERE status = 'processed'
+                  AND annotation_status = 'done'
+                """
+            )
+
+        conn.commit()
 
     return {"rebuilt": rebuilt}
 
@@ -106,7 +114,6 @@ def recompute_all() -> dict[str, Any]:
     processed from summary polylines.
     """
     with get_db() as conn:
-        conn.execute("DELETE FROM global_tiles")
         ignored_sports = settings.ignored_sports
         if ignored_sports:
             placeholders = ",".join("?" for _ in ignored_sports)
@@ -139,27 +146,6 @@ def recompute_all() -> dict[str, Any]:
                 """
             )
 
-        # Delete tiles only for non-refined activities
-        conn.execute(
-            """
-            DELETE FROM activity_tiles
-            WHERE activity_id IN (
-                SELECT id FROM activities
-                WHERE COALESCE(tile_source, '') != 'streams_clean'
-            )
-            """
-        )
-        # Reset counts only for non-refined activities
-        conn.execute(
-            """
-            UPDATE activities
-            SET squadrat_count = 0,
-                squadratinho_count = 0,
-                new_squadrat_count = 0,
-                new_squadratinho_count = 0
-            WHERE COALESCE(tile_source, '') != 'streams_clean'
-            """
-        )
         conn.commit()
 
         rows = conn.execute(
@@ -172,8 +158,8 @@ def recompute_all() -> dict[str, Any]:
         ).fetchall()
 
     total = len(rows)
-    refined = sum(1 for r in rows if r.get("tile_source") == "streams_clean")
-    rows_to_recompute = [r for r in rows if r.get("tile_source") != "streams_clean"]
+    refined = sum(1 for row in rows if row["tile_source"] == "streams_clean")
+    rows_to_recompute = [row for row in rows if row["tile_source"] != "streams_clean"]
     to_recompute = total - refined
     print(f"Recomputing {to_recompute} activities ({refined} stream-refined preserved)...")
     rebuilt = 0
