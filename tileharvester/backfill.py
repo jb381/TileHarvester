@@ -25,7 +25,10 @@ def backfill(limit: int | None = None) -> dict[str, Any]:
     page = 1
     per_page = 200
     while True:
-        result = fetch_and_store_summaries(page=page, per_page=per_page)
+        remaining = None if limit is None else max(limit - total_fetched, 0)
+        if remaining == 0:
+            break
+        result = fetch_and_store_summaries(page=page, per_page=per_page, max_items=remaining)
         fetched = result["fetched"]
         total_fetched += fetched
         total_stored += result["stored"]
@@ -40,17 +43,17 @@ def backfill(limit: int | None = None) -> dict[str, Any]:
             f"({total_fetched} fetched total)..."
         )
         page += 1
-        if fetched < per_page or (limit and total_fetched >= limit):
+        if fetched < per_page or (limit is not None and total_fetched >= limit):
             break
 
     print(
-        f"Stored {total_stored} new summaries, updated {total_updated} existing summaries, "
-        f"marked {total_skipped} non-GPS skipped, {total_ignored} ignored sports."
+        f"Stored {total_stored} new activities, updated {total_updated} existing activities, "
+        f"and marked {total_ignored} ignored sports."
     )
 
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id FROM activities WHERE status = 'pending' AND has_gps = 1 ORDER BY start_local"
+            "SELECT id FROM activities WHERE status = 'pending' ORDER BY start_local"
         ).fetchall()
 
     total = len(rows)
@@ -58,22 +61,26 @@ def backfill(limit: int | None = None) -> dict[str, Any]:
     processed = 0
     summary_processed = 0
     stream_fallbacks = 0
+    skipped_no_gps = 0
     failed = 0
     for row in track(rows, description="Processing"):
         result = compute_activity_tiles_from_summary(row["id"])
-        if result["status"] in ("processed", "skipped_no_gps"):
+        if result["status"] == "processed":
             processed += 1
             if result.get("source") == "summary_polyline":
                 summary_processed += 1
             elif result.get("source") == "streams_clean":
                 stream_fallbacks += 1
+        elif result["status"] == "skipped_no_gps":
+            skipped_no_gps += 1
         else:
             failed += 1
             console.log(f"Activity {row['id']}: {result['status']} - {result.get('error', '')}")
 
     print(
         f"Backfill complete: {processed}/{total} processed "
-        f"({summary_processed} from summary polylines, {stream_fallbacks} stream fallbacks, {failed} failed)."
+        f"({summary_processed} from summary polylines, {stream_fallbacks} stream fallbacks, "
+        f"{skipped_no_gps} without GPS, {failed} failed)."
     )
     return {
         "stored": total_stored,
@@ -81,6 +88,6 @@ def backfill(limit: int | None = None) -> dict[str, Any]:
         "summary_processed": summary_processed,
         "stream_fallbacks": stream_fallbacks,
         "failed": failed,
-        "skipped": total_skipped,
+        "skipped": total_skipped + skipped_no_gps,
         "ignored": total_ignored,
     }

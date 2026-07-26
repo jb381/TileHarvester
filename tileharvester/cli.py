@@ -2,7 +2,7 @@
 
 import time
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -54,6 +54,12 @@ app = typer.Typer(
 )
 
 
+def _period_starts(now: datetime) -> tuple[datetime, datetime]:
+    """Return Monday and month starts containing ``now``."""
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return day_start - timedelta(days=day_start.weekday()), day_start.replace(day=1)
+
+
 @app.callback(invoke_without_command=True)
 def callback(
     show_version: bool = typer.Option(False, "--version", help="Show version and exit"),
@@ -94,7 +100,7 @@ def auth(
     if not code:
         try:
             url = build_auth_url()
-        except (Exception, BaseException) as e:
+        except Exception as e:
             typer.echo(f"Authentication failed: {classify_strava_error(e)}")
             raise typer.Exit(1) from e
 
@@ -114,7 +120,7 @@ def auth(
     try:
         tokens = exchange_code(code)
         typer.echo(f"Authenticated successfully. Athlete ID: {tokens.get('athlete', {}).get('id')}")
-    except (Exception, BaseException) as e:
+    except Exception as e:
         typer.echo(f"Authentication failed: {classify_strava_error(e)}")
         raise typer.Exit(1) from e
 
@@ -132,7 +138,7 @@ def backfill(
     try:
         result = run_backfill(limit=limit)
         typer.echo(f"Backfill complete: {result['stored']} stored, {result['processed']} processed")
-    except (Exception, BaseException) as e:
+    except Exception as e:
         typer.echo(f"Backfill failed: {classify_strava_error(e)}")
         raise typer.Exit(1) from e
 
@@ -160,7 +166,7 @@ def sync(
             typer.echo(
                 f"Sync complete: {result['new_activities']} new, {result['processed']} processed, {result['annotated']} annotated"
             )
-        except (Exception, BaseException) as e:
+        except Exception as e:
             typer.echo(f"Sync failed: {classify_strava_error(e)}")
             raise typer.Exit(1) from e
     else:
@@ -190,7 +196,7 @@ def retry() -> None:
     try:
         result = retry_failed()
         typer.echo(f"Retried {result['retried']}, succeeded {result['success']}")
-    except (Exception, BaseException) as e:
+    except Exception as e:
         typer.echo(f"Retry failed: {classify_strava_error(e)}")
         raise typer.Exit(1) from e
 
@@ -216,7 +222,7 @@ def refine(
             f"Refine complete: {result['refined']}/{result['selected']} refined, "
             f"{result['failed']} failed, {result['splits']} GPS gaps split, {result['rebuilt']} rebuilt"
         )
-    except (Exception, BaseException) as e:
+    except Exception as e:
         typer.echo(f"Refine failed: {classify_strava_error(e)}")
         raise typer.Exit(1) from e
 
@@ -293,18 +299,13 @@ def status() -> None:
 def stats() -> None:
     """Show detailed period stats."""
     with get_db() as conn:
-        # This week
-        week_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        while week_start.weekday() != 0:
-            week_start = week_start.replace(day=week_start.day - 1)
+        week_start, month_start = _period_starts(datetime.now())
 
         week_new = conn.execute(
             "SELECT COALESCE(SUM(new_squadrat_count), 0) FROM activities WHERE status = 'processed' AND start_local >= ?",
             (week_start.isoformat(),),
         ).fetchone()[0]
 
-        # This month
-        month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         month_new = conn.execute(
             "SELECT COALESCE(SUM(new_squadrat_count), 0) FROM activities WHERE status = 'processed' AND start_local >= ?",
             (month_start.isoformat(),),
@@ -362,7 +363,7 @@ def validate(
     typer.echo(f"Fetching activity {activity_id} GPS stream...")
     try:
         streams = get_activity_streams(activity_id, keys="latlng,time")
-    except (Exception, BaseException) as e:
+    except Exception as e:
         typer.echo(f"Failed: {classify_strava_error(e)}")
         raise typer.Exit(1) from e
 
@@ -494,15 +495,16 @@ def health(
 def service(
     action: str = typer.Argument("print", help="Action: print, install"),
     interval: int = typer.Option(5, help="Timer interval in minutes"),
-    python: str = typer.Option("/usr/bin/python3", help="Python executable path"),
+    python: str | None = typer.Option(None, help="Python executable path"),
+    env_file: str | None = typer.Option(None, help="Environment file path"),
 ) -> None:
     """Generate or install systemd service/timer files."""
     if action == "print":
-        print_service(python=python)
+        print_service(python=python, interval=interval, env_file=env_file)
     elif action == "install":
         try:
-            install_service(python=python, interval=interval)
-        except (Exception, BaseException) as e:
+            install_service(python=python, interval=interval, env_file=env_file)
+        except Exception as e:
             typer.echo(f"Install failed (may need sudo): {e}")
             raise typer.Exit(1) from e
     else:

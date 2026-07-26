@@ -78,6 +78,16 @@ MIGRATIONS = [
     """
     ALTER TABLE activities ADD COLUMN tile_source TEXT;
     """,
+    """
+    UPDATE activities
+    SET status = 'pending'
+    WHERE status = 'skipped_no_gps'
+      AND COALESCE(summary_polyline, '') = '';
+
+    UPDATE activities
+    SET annotation_status = 'done'
+    WHERE annotation_status IN ('updated', 'skipped');
+    """,
 ]
 
 
