@@ -9,7 +9,7 @@ import polyline
 from rich.progress import track
 
 from tileharvester.config import settings
-from tileharvester.db import get_db
+from tileharvester.db import get_db, get_setting, set_setting
 from tileharvester.strava_client import (
     classify_strava_error,
     get_activities,
@@ -17,14 +17,21 @@ from tileharvester.strava_client import (
 )
 from tileharvester.tile_engine import make_engine
 
+_LAST_SUCCESSFUL_SYNC_KEY = "last_successful_sync_at"
+
 
 def _week_start(dt: datetime) -> datetime:
     """ISO week start (Monday)."""
-    return dt - timedelta(days=dt.weekday())
+    return (dt - timedelta(days=dt.weekday())).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
 
 
 def _month_start(dt: datetime) -> datetime:
-    return dt.replace(day=1)
+    return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
 def _parse_local(local_str: str) -> datetime:
@@ -37,6 +44,54 @@ def _parse_local(local_str: str) -> datetime:
     if ":" in local_str and local_str.count("-") > 2:
         local_str = local_str[: local_str.rfind("-", 0, local_str.rfind(":"))]
     return datetime.fromisoformat(local_str)
+
+
+def _parse_utc(utc_str: str) -> datetime:
+    """Parse an ISO timestamp and normalize it to UTC."""
+    normalized = utc_str[:-1] + "+00:00" if utc_str.endswith("Z") else utc_str
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _latest_stored_activity_utc() -> datetime | None:
+    """Return the newest activity timestamp available in the local database."""
+    with get_db() as conn:
+        value = conn.execute("SELECT MAX(start_utc) FROM activities").fetchone()[0]
+    if not value:
+        return None
+    try:
+        return _parse_utc(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sync_after_timestamp(sync_started_at: datetime) -> int:
+    """Choose a resilient Strava fetch boundary with an overlap window.
+
+    Prefer the last successful poll so a server catches up after downtime.
+    Existing installations without a cursor fall back to the newest locally
+    stored activity. Empty databases retain the normal configured lookback.
+    """
+    if sync_started_at.tzinfo is None:
+        sync_started_at = sync_started_at.replace(tzinfo=timezone.utc)
+    else:
+        sync_started_at = sync_started_at.astimezone(timezone.utc)
+
+    anchor: datetime | None = None
+    cursor = get_setting(_LAST_SUCCESSFUL_SYNC_KEY)
+    if isinstance(cursor, str):
+        try:
+            anchor = _parse_utc(cursor)
+        except ValueError:
+            anchor = None
+    if anchor is None:
+        anchor = _latest_stored_activity_utc()
+
+    # Do not let corrupt or future timestamps skip the current polling window.
+    anchor = min(anchor or sync_started_at, sync_started_at)
+    return int((anchor - timedelta(days=settings.sync_lookback_days)).timestamp())
 
 
 def _summary_polyline(activity: dict[str, Any]) -> str | None:
@@ -542,9 +597,8 @@ def _fetch_recent_activities(after: int, per_page: int = 200) -> list[dict[str, 
 
 def sync_once() -> dict[str, Any]:
     """Incremental sync: fetch recent, compute tiles, annotate new activities."""
-    after = int(
-        (datetime.now(tz=timezone.utc) - timedelta(days=settings.sync_lookback_days)).timestamp()
-    )
+    sync_started_at = datetime.now(tz=timezone.utc)
+    after = _sync_after_timestamp(sync_started_at)
     activities = _fetch_recent_activities(after)
 
     new_count = 0
@@ -643,6 +697,8 @@ def sync_once() -> dict[str, Any]:
         if result["status"] == "annotated":
             annotated += 1
             print(f"Annotated {row['id']}: {result['line']}")
+
+    set_setting(_LAST_SUCCESSFUL_SYNC_KEY, sync_started_at.isoformat())
 
     return {
         "new_activities": new_count,
