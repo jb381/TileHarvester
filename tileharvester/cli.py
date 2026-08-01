@@ -5,6 +5,7 @@ import webbrowser
 from datetime import datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import Annotated
 from urllib.parse import parse_qs, urlparse
 
 import typer
@@ -12,6 +13,14 @@ import typer
 from tileharvester.backfill import backfill as run_backfill
 from tileharvester.config import settings
 from tileharvester.db import get_db, migrate, reset
+from tileharvester.kml_baseline import (
+    compare_kml as compare_kml_file,
+)
+from tileharvester.kml_baseline import (
+    effective_tile_count,
+    get_baseline,
+    import_baseline,
+)
 from tileharvester.recompute import recompute_all, recompute_novelty_from_stored_tiles
 from tileharvester.refine import refine_streams
 from tileharvester.strava_client import (
@@ -267,12 +276,10 @@ def status() -> None:
             """
         ).fetchone()[0]
 
-        total_squadrats = conn.execute(
-            "SELECT COUNT(*) FROM global_tiles WHERE tile_kind = 'squadrat'"
-        ).fetchone()[0]
-        total_squadratinhos = conn.execute(
-            "SELECT COUNT(*) FROM global_tiles WHERE tile_kind = 'squadratinho'"
-        ).fetchone()[0]
+        baseline = get_baseline(conn)
+
+    total_squadrats = effective_tile_count("squadrat")
+    total_squadratinhos = effective_tile_count("squadratinho")
 
     typer.echo("TileHarvester Status")
     typer.echo("=" * 40)
@@ -290,6 +297,9 @@ def status() -> None:
     typer.echo(f"Unannotated processed:     {unannotated_processed}")
     typer.echo(f"Total unique Squadrats:    {total_squadrats}")
     typer.echo(f"Total unique Squadratinhos: {total_squadratinhos}")
+    if baseline is not None:
+        typer.echo(f"KML baseline:              {baseline['source_name']}")
+        typer.echo(f"Baseline as of (UTC):      {baseline['as_of_utc']}")
 
     if not is_authenticated():
         typer.echo("\nWarning: Not authenticated with Strava.")
@@ -311,15 +321,63 @@ def stats() -> None:
             (month_start.isoformat(),),
         ).fetchone()[0]
 
-        total_new = conn.execute(
-            "SELECT COUNT(*) FROM global_tiles WHERE tile_kind = 'squadrat'"
-        ).fetchone()[0]
+    total_new = effective_tile_count("squadrat")
 
     typer.echo("TileHarvester Stats")
     typer.echo("=" * 40)
     typer.echo(f"New Squadrats this week:  {week_new}")
     typer.echo(f"New Squadrats this month: {month_new}")
     typer.echo(f"Total unique Squadrats:   {total_new}")
+
+
+@app.command("import-kml")
+def import_kml_command(
+    path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    as_of: str | None = typer.Option(
+        None,
+        "--as-of",
+        help="UTC snapshot timestamp (ISO-8601); defaults to the current time",
+    ),
+) -> None:
+    """Install one immutable Squadrats KML baseline."""
+    typer.echo(f"Reading Squadrats KML: {path.name}")
+    try:
+        result = import_baseline(path, as_of=as_of)
+        rebuilt = recompute_novelty_from_stored_tiles()
+    except ValueError as exc:
+        typer.echo(f"KML import failed: {exc}")
+        raise typer.Exit(1) from exc
+
+    typer.echo(
+        f"Imported {result['squadrats']:,} Squadrats and {result['squadratinhos']:,} Squadratinhos"
+    )
+    typer.echo(f"Baseline as of: {result['as_of_utc']}")
+    typer.echo(f"Rebuilt novelty for {rebuilt['rebuilt']} stored activities")
+    typer.echo("Future exports can be checked with 'tileharvester compare-kml'.")
+
+
+@app.command("compare-kml")
+def compare_kml_command(
+    path: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+) -> None:
+    """Compare a Squadrats KML export with effective local tiles without writing."""
+    typer.echo(f"Comparing Squadrats KML: {path.name}")
+    try:
+        result = compare_kml_file(path)
+    except ValueError as exc:
+        typer.echo(f"KML comparison failed: {exc}")
+        raise typer.Exit(1) from exc
+
+    typer.echo("Kind             KML      Local     Shared   KML-only Local-only")
+    for tile_kind, label in (
+        ("squadrat", "Squadrats"),
+        ("squadratinho", "Squadratinhos"),
+    ):
+        row = result[tile_kind]
+        typer.echo(
+            f"{label:<16} {row['kml']:>8,} {row['local']:>10,} {row['shared']:>10,} "
+            f"{row['kml_only']:>10,} {row['local_only']:>10,}"
+        )
 
 
 @app.command()

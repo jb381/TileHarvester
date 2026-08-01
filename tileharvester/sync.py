@@ -10,6 +10,13 @@ from rich.progress import track
 
 from tileharvester.config import settings
 from tileharvester.db import get_db
+from tileharvester.kml_baseline import (
+    activity_is_covered,
+    activity_uses_baseline,
+    baseline_tiles_on_route,
+    effective_tile_count_through,
+    get_baseline,
+)
 from tileharvester.strava_client import (
     classify_strava_error,
     get_activities,
@@ -207,8 +214,9 @@ def fetch_and_store_summaries(
             conn.execute(
                 """
                 INSERT INTO activities
-                (id, start_utc, start_local, timezone, sport_type, summary_polyline, has_gps, status, tile_engine)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, start_utc, start_local, timezone, sport_type, summary_polyline,
+                 has_gps, status, tile_engine, baseline_covered)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     aid,
@@ -220,6 +228,7 @@ def fetch_and_store_summaries(
                     int(has_gps),
                     status,
                     make_engine().id,
+                    int(activity_is_covered(conn, a["start_date"])),
                 ),
             )
             if status == "skipped_ignored_sport":
@@ -261,26 +270,63 @@ def _prior_activity_tiles(
     tiles: set[str],
     start_local: str,
     activity_id: int,
+    *,
+    start_utc: str | None = None,
+    use_baseline: bool = False,
 ) -> set[str]:
     seen: set[str] = set()
     tile_list = list(tiles)
     for i in range(0, len(tile_list), 500):
         chunk = tile_list[i : i + 500]
         placeholders = ",".join("?" for _ in chunk)
-        rows = conn.execute(
-            f"""
-            SELECT DISTINCT at.tile_id
-            FROM activity_tiles at
-            JOIN activities a ON a.id = at.activity_id
-            WHERE at.tile_kind = ?
-              AND a.status = 'processed'
-              AND a.id != ?
-              AND a.start_local < ?
-              AND at.tile_id IN ({placeholders})
-            """,
-            (tile_kind, activity_id, start_local, *chunk),
-        ).fetchall()
+        if use_baseline:
+            if start_utc is None:
+                raise ValueError("start_utc is required for baseline-aware novelty")
+            baseline = get_baseline(conn)
+            if baseline is None:
+                raise ValueError("Baseline-aware novelty requested without an installed baseline")
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT at.tile_id
+                FROM activity_tiles at
+                JOIN activities a ON a.id = at.activity_id
+                WHERE at.tile_kind = ?
+                  AND a.status = 'processed'
+                  AND a.id != ?
+                  AND (a.baseline_covered = 1 OR julianday(a.start_utc) > julianday(?))
+                  AND (
+                      julianday(a.start_utc) < julianday(?)
+                      OR (a.start_utc = ? AND a.id < ?)
+                  )
+                  AND at.tile_id IN ({placeholders})
+                """,
+                (
+                    tile_kind,
+                    activity_id,
+                    baseline["as_of_utc"],
+                    start_utc,
+                    start_utc,
+                    activity_id,
+                    *chunk,
+                ),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT at.tile_id
+                FROM activity_tiles at
+                JOIN activities a ON a.id = at.activity_id
+                WHERE at.tile_kind = ?
+                  AND a.status = 'processed'
+                  AND a.id != ?
+                  AND a.start_local < ?
+                  AND at.tile_id IN ({placeholders})
+                """,
+                (tile_kind, activity_id, start_local, *chunk),
+            ).fetchall()
         seen.update(r["tile_id"] for r in rows)
+    if use_baseline:
+        seen.update(baseline_tiles_on_route(conn, tile_kind, tiles))
     return seen
 
 
@@ -292,37 +338,60 @@ def compute_historical_novelty(
 ) -> dict[str, Any]:
     """Compare activity tiles with processed local history before this activity."""
     with get_db() as conn:
+        activity = conn.execute("SELECT * FROM activities WHERE id = ?", (activity_id,)).fetchone()
+        use_baseline = bool(activity and activity_uses_baseline(conn, activity))
+        start_utc = activity["start_utc"] if activity else None
         processed_before = conn.execute(
             "SELECT COUNT(*) FROM activities WHERE status = 'processed' AND start_local < ?",
             (start_local,),
         ).fetchone()[0]
-        total_squadrats_before = conn.execute(
-            """
-            SELECT COUNT(DISTINCT at.tile_id)
-            FROM activity_tiles at
-            JOIN activities a ON a.id = at.activity_id
-            WHERE at.tile_kind = 'squadrat'
-              AND a.status = 'processed'
-              AND a.start_local < ?
-            """,
-            (start_local,),
-        ).fetchone()[0]
-        total_squadratinhos_before = conn.execute(
-            """
-            SELECT COUNT(DISTINCT at.tile_id)
-            FROM activity_tiles at
-            JOIN activities a ON a.id = at.activity_id
-            WHERE at.tile_kind = 'squadratinho'
-              AND a.status = 'processed'
-              AND a.start_local < ?
-            """,
-            (start_local,),
-        ).fetchone()[0]
+        if activity is not None:
+            total_squadrats_before = effective_tile_count_through(
+                conn, "squadrat", activity, include_activity=False
+            )
+            total_squadratinhos_before = effective_tile_count_through(
+                conn, "squadratinho", activity, include_activity=False
+            )
+        else:
+            total_squadrats_before = conn.execute(
+                """
+                SELECT COUNT(DISTINCT at.tile_id)
+                FROM activity_tiles at
+                JOIN activities a ON a.id = at.activity_id
+                WHERE at.tile_kind = 'squadrat'
+                  AND a.status = 'processed'
+                  AND a.start_local < ?
+                """,
+                (start_local,),
+            ).fetchone()[0]
+            total_squadratinhos_before = conn.execute(
+                """
+                SELECT COUNT(DISTINCT at.tile_id)
+                FROM activity_tiles at
+                JOIN activities a ON a.id = at.activity_id
+                WHERE at.tile_kind = 'squadratinho'
+                  AND a.status = 'processed'
+                  AND a.start_local < ?
+                """,
+                (start_local,),
+            ).fetchone()[0]
         seen_squadrats = _prior_activity_tiles(
-            conn, "squadrat", squadrats, start_local, activity_id
+            conn,
+            "squadrat",
+            squadrats,
+            start_local,
+            activity_id,
+            start_utc=start_utc,
+            use_baseline=use_baseline,
         )
         seen_squadratinhos = _prior_activity_tiles(
-            conn, "squadratinho", squadratinhos, start_local, activity_id
+            conn,
+            "squadratinho",
+            squadratinhos,
+            start_local,
+            activity_id,
+            start_utc=start_utc,
+            use_baseline=use_baseline,
         )
 
     new_squadrats = squadrats - seen_squadrats
@@ -360,11 +429,25 @@ def _store_activity_tiles(
 
     with get_db() as conn:
         start_local = row["start_local"]
+        start_utc = row["start_utc"]
+        use_baseline = activity_uses_baseline(conn, row)
         existing_squadrats = _prior_activity_tiles(
-            conn, "squadrat", squadrats, start_local, activity_id
+            conn,
+            "squadrat",
+            squadrats,
+            start_local,
+            activity_id,
+            start_utc=start_utc,
+            use_baseline=use_baseline,
         )
         existing_squadratinhos = _prior_activity_tiles(
-            conn, "squadratinho", squadratinhos, start_local, activity_id
+            conn,
+            "squadratinho",
+            squadratinhos,
+            start_local,
+            activity_id,
+            start_utc=start_utc,
+            use_baseline=use_baseline,
         )
 
         new_squadrats = squadrats - existing_squadrats
@@ -513,19 +596,12 @@ def compute_period_totals(start_local: str) -> tuple[int, int]:
 
 def compute_total_unique_squadrats_through(activity_id: int, start_local: str) -> int:
     """Return total unique Squadrats seen before this activity plus this activity."""
+    del start_local  # Retained in the public helper signature for backwards compatibility.
     with get_db() as conn:
-        total = conn.execute(
-            """
-            SELECT COUNT(DISTINCT at.tile_id)
-            FROM activity_tiles at
-            JOIN activities a ON a.id = at.activity_id
-            WHERE at.tile_kind = 'squadrat'
-              AND a.status = 'processed'
-              AND (a.start_local < ? OR a.id = ?)
-            """,
-            (start_local, activity_id),
-        ).fetchone()[0]
-    return int(total)
+        activity = conn.execute("SELECT * FROM activities WHERE id = ?", (activity_id,)).fetchone()
+        if activity is None:
+            return 0
+        return effective_tile_count_through(conn, "squadrat", activity, include_activity=True)
 
 
 def _fetch_recent_activities(after: int, per_page: int = 200) -> list[dict[str, Any]]:
@@ -589,8 +665,9 @@ def sync_once() -> dict[str, Any]:
                 conn.execute(
                     """
                     INSERT INTO activities
-                    (id, start_utc, start_local, timezone, sport_type, summary_polyline, has_gps, status, tile_engine)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, start_utc, start_local, timezone, sport_type, summary_polyline,
+                     has_gps, status, tile_engine, baseline_covered)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         aid,
@@ -602,6 +679,7 @@ def sync_once() -> dict[str, Any]:
                         int(has_gps),
                         status,
                         make_engine().id,
+                        int(activity_is_covered(conn, a["start_date"])),
                     ),
                 )
                 new_count += 1
