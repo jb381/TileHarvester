@@ -83,6 +83,8 @@ docker compose --profile cron up -d tileharvester-cron
 | `tileharvester sync --once` | Single sync 🔄                           |
 | `tileharvester sync`        | Keep watching 👀                         |
 | `tileharvester status`      | What's up 📊                             |
+| `tileharvester import-kml`  | Seed exact tiles from Squadrats 🧭       |
+| `tileharvester compare-kml` | Audit local tiles against Squadrats 🔎   |
 
 Run `tileharvester --help` for the full menu.
 
@@ -119,6 +121,30 @@ silently missed. Existing installations without a cursor fall back to the newest
 activity already stored locally.
 
 Check your refinement status with `tileharvester status` — look for "Stream-refined" vs "Needs stream refinement".
+
+### Optional exact Squadrats baseline
+
+Squadrats can export your exact visited tiles as a KML file. TileHarvester can use one export
+as an authoritative starting point, then track new tiles from Strava without relying on repeated
+Squadrats downloads:
+
+```bash
+# Download the KML from the Squadrats desktop map after its activity sync is complete
+uv run tileharvester import-kml ~/Downloads/squadrats-2026-08-01.kml
+
+# Later exports are comparisons only; the original baseline stays immutable
+uv run tileharvester compare-kml ~/Downloads/squadrats-latest.kml
+```
+
+The import reads the exact Squadrats and Squadratinhos layers, records the snapshot time and file
+checksum, and rebuilds stored novelty without replacing existing processed history. For a known
+export time, pass an explicit timestamp such as `--as-of 2026-08-01T18:43:00+02:00`; otherwise the
+import time is used.
+
+The KML is a cumulative snapshot and does not identify which historical activity first visited a
+tile. On a fresh installation, lifetime totals are exact from the baseline and weekly, monthly, and
+per-activity `new` counts accumulate from that point forward. `backfill` and `refine` remain available
+when historical attribution matters. Without a KML baseline, TileHarvester behaves exactly as before.
 
 ### Rebuilding totals
 

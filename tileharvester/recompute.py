@@ -7,6 +7,7 @@ from rich.progress import track
 
 from tileharvester.config import settings
 from tileharvester.db import get_db
+from tileharvester.kml_baseline import activity_uses_baseline
 from tileharvester.sync import (
     _prior_activity_tiles,
     _store_activity_tiles,
@@ -27,13 +28,20 @@ def recompute_novelty_from_stored_tiles() -> dict[str, Any]:
             """
         )
         rows = conn.execute(
-            "SELECT id, start_local FROM activities WHERE status = 'processed' ORDER BY start_local"
+            """
+            SELECT id, start_utc, start_local, baseline_covered
+            FROM activities
+            WHERE status = 'processed'
+            ORDER BY start_local
+            """
         ).fetchall()
 
         rebuilt = 0
         for row in rows:
             aid = row["id"]
             start_local = row["start_local"]
+            start_utc = row["start_utc"]
+            use_baseline = activity_uses_baseline(conn, row)
             squadrats = {
                 r["tile_id"]
                 for r in conn.execute(
@@ -50,10 +58,22 @@ def recompute_novelty_from_stored_tiles() -> dict[str, Any]:
             }
 
             new_squadrats = squadrats - _prior_activity_tiles(
-                conn, "squadrat", squadrats, start_local, aid
+                conn,
+                "squadrat",
+                squadrats,
+                start_local,
+                aid,
+                start_utc=start_utc,
+                use_baseline=use_baseline,
             )
             new_squadratinhos = squadratinhos - _prior_activity_tiles(
-                conn, "squadratinho", squadratinhos, start_local, aid
+                conn,
+                "squadratinho",
+                squadratinhos,
+                start_local,
+                aid,
+                start_utc=start_utc,
+                use_baseline=use_baseline,
             )
 
             conn.executemany(
