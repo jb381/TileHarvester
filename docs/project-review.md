@@ -117,6 +117,14 @@ The old expression replaced an entire line such as “I tried TileHarvester: it
 helped me explore.” Annotation matching now requires the configured prefix at the
 start of the line, allowing leading emoji and whitespace. Ordinary prose survives.
 
+### [P2] Replace vulnerable locked dependencies — `uv.lock`
+
+The audit reported PYSEC-2026-215 in idna 3.13 and CVE-2026-58203 in
+pydantic-settings 2.14.1. The lockfile now resolves idna 3.19 and
+pydantic-settings 2.15.0; the direct pydantic-settings requirement also excludes
+versions below the reported 2.14.2 fix. A fresh audit of the pinned production
+requirements reports no known vulnerabilities.
+
 ## Existing PR fixes retained
 
 - PR #6's persistent polling cursor recovers activities after downtime longer than
