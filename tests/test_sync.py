@@ -5,7 +5,7 @@ from typing import Any
 
 import tileharvester.sync as sync_mod
 from tileharvester.config import settings
-from tileharvester.db import get_db
+from tileharvester.db import get_db, get_setting, set_setting
 
 
 def _insert_activity(
@@ -16,17 +16,73 @@ def _insert_activity(
     status: str = "pending",
     annotation_status: str = "none",
     has_gps: int = 0,
+    new_squadrat_count: int = 0,
 ) -> None:
     with get_db() as conn:
         conn.execute(
             """
             INSERT INTO activities
-                (id, start_utc, start_local, has_gps, status, annotation_status)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (id, start_utc, start_local, has_gps, status, annotation_status,
+                 new_squadrat_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (activity_id, start_utc, start_local, has_gps, status, annotation_status),
+            (
+                activity_id,
+                start_utc,
+                start_local,
+                has_gps,
+                status,
+                annotation_status,
+                new_squadrat_count,
+            ),
         )
         conn.commit()
+
+
+def test_period_boundaries_start_at_midnight() -> None:
+    activity_time = datetime(2026, 7, 22, 18, 45, 12, 123456)
+
+    assert sync_mod._week_start(activity_time) == datetime(2026, 7, 20)
+    assert sync_mod._month_start(activity_time) == datetime(2026, 7, 1)
+
+
+def test_period_totals_include_earlier_activity_on_first_day(isolated_db) -> None:
+    del isolated_db
+    _insert_activity(
+        1,
+        start_local="2026-07-20T08:00:00",
+        status="processed",
+        new_squadrat_count=5,
+    )
+    _insert_activity(
+        2,
+        start_local="2026-07-20T12:00:00",
+        status="processed",
+        new_squadrat_count=3,
+    )
+
+    assert sync_mod.compute_period_totals("2026-07-20T12:00:00") == (8, 8)
+
+
+def test_sync_boundary_falls_back_to_latest_stored_activity(isolated_db, monkeypatch) -> None:
+    del isolated_db
+    monkeypatch.setattr(settings, "sync_lookback_days", 7)
+    _insert_activity(1, start_utc="2026-05-10T10:00:00Z")
+
+    after = sync_mod._sync_after_timestamp(datetime(2026, 7, 26, 18, 0, tzinfo=timezone.utc))
+
+    assert after == int(datetime(2026, 5, 3, 10, 0, tzinfo=timezone.utc).timestamp())
+
+
+def test_sync_boundary_prefers_successful_poll_cursor(isolated_db, monkeypatch) -> None:
+    del isolated_db
+    monkeypatch.setattr(settings, "sync_lookback_days", 7)
+    _insert_activity(1, start_utc="2026-05-10T10:00:00Z")
+    set_setting("last_successful_sync_at", "2026-07-25T09:30:00+00:00")
+
+    after = sync_mod._sync_after_timestamp(datetime(2026, 7, 26, 18, 0, tzinfo=timezone.utc))
+
+    assert after == int(datetime(2026, 7, 18, 9, 30, tzinfo=timezone.utc).timestamp())
 
 
 def test_activity_without_summary_is_queued_for_stream_check() -> None:
@@ -105,6 +161,7 @@ def test_sync_uses_utc_timestamp_for_annotation_eligibility(isolated_db, monkeyp
 
     assert result["annotated"] == 1
     assert annotated == [1]
+    assert get_setting("last_successful_sync_at") is not None
 
 
 def test_sync_rewrites_old_annotations_when_enabled(isolated_db, monkeypatch) -> None:

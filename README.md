@@ -113,6 +113,11 @@ cron sync → automatically uses full GPS streams for every new activity
 
 **New activities are always processed from full streams** — you get the best accuracy automatically going forward. Only historical data from `backfill` needs refinement.
 
+Successful syncs save a polling cursor. After downtime, TileHarvester resumes from
+the last successful poll with the configured overlap window, so activities are not
+silently missed. Existing installations without a cursor fall back to the newest
+activity already stored locally.
+
 Check your refinement status with `tileharvester status` — look for "Stream-refined" vs "Needs stream refinement".
 
 ### Rebuilding totals
