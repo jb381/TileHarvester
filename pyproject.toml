@@ -26,6 +26,7 @@ dev = [
     "ruff>=0.6.0",
     "mypy>=1.11.0",
     "pre-commit>=3.8.0",
+    "pytest-cov>=7.1.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -67,3 +68,16 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 warn_unused_configs = true
 show_error_codes = true
+
+[tool.ruff.lint.per-file-ignores]
+# Pytest fixtures are often requested for their setup/teardown side effects.
+"tests/**" = ["ARG001", "ARG002"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["tileharvester"]
+
+[tool.coverage.report]
+show_missing = true

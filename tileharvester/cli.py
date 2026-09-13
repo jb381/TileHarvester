@@ -175,6 +175,13 @@ def sync(
             typer.echo(
                 f"Sync complete: {result['new_activities']} new, {result['processed']} processed, {result['annotated']} annotated"
             )
+            if result.get("failed", 0):
+                typer.echo(
+                    f"{result['failed']} processing or annotation failures; see status/retry."
+                )
+                raise typer.Exit(1)
+        except typer.Exit:
+            raise
         except Exception as e:
             typer.echo(f"Sync failed: {classify_strava_error(e)}")
             raise typer.Exit(1) from e
@@ -343,7 +350,6 @@ def import_kml_command(
     typer.echo(f"Reading Squadrats KML: {path.name}")
     try:
         result = import_baseline(path, as_of=as_of)
-        rebuilt = recompute_novelty_from_stored_tiles()
     except ValueError as exc:
         typer.echo(f"KML import failed: {exc}")
         raise typer.Exit(1) from exc
@@ -352,7 +358,7 @@ def import_kml_command(
         f"Imported {result['squadrats']:,} Squadrats and {result['squadratinhos']:,} Squadratinhos"
     )
     typer.echo(f"Baseline as of: {result['as_of_utc']}")
-    typer.echo(f"Rebuilt novelty for {rebuilt['rebuilt']} stored activities")
+    typer.echo(f"Rebuilt novelty for {result['rebuilt']} stored activities")
     typer.echo("Future exports can be checked with 'tileharvester compare-kml'.")
 
 
@@ -409,11 +415,13 @@ def validate(
         row = conn.execute("SELECT * FROM activities WHERE id = ?", (activity_id,)).fetchone()
 
     start_local = row["start_local"] if row else None
+    start_utc = row["start_utc"] if row else None
     if start_local is None:
         typer.echo(f"Fetching activity {activity_id} metadata...")
         try:
             activity = get_activity(activity_id)
             start_local = activity.get("start_date_local")
+            start_utc = activity.get("start_date")
         except Exception as e:
             typer.echo(f"Failed: {classify_strava_error(e)}")
             raise typer.Exit(1) from e
@@ -425,7 +433,11 @@ def validate(
         typer.echo(f"Failed: {classify_strava_error(e)}")
         raise typer.Exit(1) from e
 
-    segments, stream_stats = clean_stream_segments(streams)
+    try:
+        segments, stream_stats = clean_stream_segments(streams)
+    except (ValueError, TypeError, IndexError) as exc:
+        typer.echo(f"Invalid GPS stream: {exc}")
+        raise typer.Exit(1) from exc
 
     engine = make_engine()
     squadrats, squadratinhos = engine.tiles_for_segments(segments)
@@ -445,7 +457,9 @@ def validate(
 
     novelty = None
     if start_local:
-        novelty = compute_historical_novelty(activity_id, start_local, squadrats, squadratinhos)
+        novelty = compute_historical_novelty(
+            activity_id, start_local, squadrats, squadratinhos, start_utc=start_utc
+        )
         typer.echo("")
         typer.echo("  Historical comparison from local DB:")
         typer.echo(f"    Processed activities before:       {novelty['processed_before']}")

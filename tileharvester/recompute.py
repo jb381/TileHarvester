@@ -7,9 +7,8 @@ from rich.progress import track
 
 from tileharvester.config import settings
 from tileharvester.db import get_db
-from tileharvester.kml_baseline import activity_uses_baseline
+from tileharvester.history import rebuild_tile_history
 from tileharvester.sync import (
-    _prior_activity_tiles,
     _store_activity_tiles,
 )
 
@@ -17,100 +16,10 @@ from tileharvester.sync import (
 def recompute_novelty_from_stored_tiles() -> dict[str, Any]:
     """Rebuild global tiles and per-activity novelty from existing activity_tiles."""
     with get_db() as conn:
-        conn.execute("DELETE FROM global_tiles")
-        conn.execute("UPDATE activity_tiles SET is_new = 0")
-        conn.execute(
-            """
-            UPDATE activities
-            SET new_squadrat_count = 0,
-                new_squadratinho_count = 0
-            WHERE status = 'processed'
-            """
-        )
-        rows = conn.execute(
-            """
-            SELECT id, start_utc, start_local, baseline_covered
-            FROM activities
-            WHERE status = 'processed'
-            ORDER BY start_local
-            """
-        ).fetchall()
-
-        rebuilt = 0
-        for row in rows:
-            aid = row["id"]
-            start_local = row["start_local"]
-            start_utc = row["start_utc"]
-            use_baseline = activity_uses_baseline(conn, row)
-            squadrats = {
-                r["tile_id"]
-                for r in conn.execute(
-                    "SELECT tile_id FROM activity_tiles WHERE activity_id = ? AND tile_kind = 'squadrat'",
-                    (aid,),
-                ).fetchall()
-            }
-            squadratinhos = {
-                r["tile_id"]
-                for r in conn.execute(
-                    "SELECT tile_id FROM activity_tiles WHERE activity_id = ? AND tile_kind = 'squadratinho'",
-                    (aid,),
-                ).fetchall()
-            }
-
-            new_squadrats = squadrats - _prior_activity_tiles(
-                conn,
-                "squadrat",
-                squadrats,
-                start_local,
-                aid,
-                start_utc=start_utc,
-                use_baseline=use_baseline,
-            )
-            new_squadratinhos = squadratinhos - _prior_activity_tiles(
-                conn,
-                "squadratinho",
-                squadratinhos,
-                start_local,
-                aid,
-                start_utc=start_utc,
-                use_baseline=use_baseline,
-            )
-
-            conn.executemany(
-                "UPDATE activity_tiles SET is_new = 1 WHERE activity_id = ? AND tile_kind = 'squadrat' AND tile_id = ?",
-                [(aid, t) for t in new_squadrats],
-            )
-            conn.executemany(
-                "UPDATE activity_tiles SET is_new = 1 WHERE activity_id = ? AND tile_kind = 'squadratinho' AND tile_id = ?",
-                [(aid, t) for t in new_squadratinhos],
-            )
-            conn.executemany(
-                """
-                INSERT INTO global_tiles (tile_kind, tile_id, first_activity_id, first_seen_local)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(tile_kind, tile_id) DO UPDATE SET
-                    first_activity_id = excluded.first_activity_id,
-                    first_seen_local = excluded.first_seen_local
-                WHERE excluded.first_seen_local < global_tiles.first_seen_local
-                """,
-                [("squadrat", t, aid, start_local) for t in new_squadrats],
-            )
-            conn.executemany(
-                """
-                INSERT INTO global_tiles (tile_kind, tile_id, first_activity_id, first_seen_local)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(tile_kind, tile_id) DO UPDATE SET
-                    first_activity_id = excluded.first_activity_id,
-                    first_seen_local = excluded.first_seen_local
-                WHERE excluded.first_seen_local < global_tiles.first_seen_local
-                """,
-                [("squadratinho", t, aid, start_local) for t in new_squadratinhos],
-            )
-            conn.execute(
-                "UPDATE activities SET new_squadrat_count = ?, new_squadratinho_count = ? WHERE id = ?",
-                (len(new_squadrats), len(new_squadratinhos), aid),
-            )
-            rebuilt += 1
+        rebuilt = conn.execute(
+            "SELECT COUNT(*) FROM activities WHERE status = 'processed'"
+        ).fetchone()[0]
+        rebuild_tile_history(conn)
 
         if settings.rewrite_existing_annotations:
             conn.execute(
@@ -149,10 +58,9 @@ def recompute_all() -> dict[str, Any]:
             conn.execute(
                 f"""
                 UPDATE activities
-                SET status = 'processed'
+                SET status = CASE WHEN tile_source IS NOT NULL THEN 'processed' ELSE 'pending' END
                 WHERE status = 'skipped_ignored_sport'
-                  AND has_gps = 1
-                  AND sport_type NOT IN ({placeholders})
+                  AND COALESCE(sport_type, '') NOT IN ({placeholders})
                 """,
                 tuple(ignored_sports),
             )
@@ -160,9 +68,8 @@ def recompute_all() -> dict[str, Any]:
             conn.execute(
                 """
                 UPDATE activities
-                SET status = 'processed'
+                SET status = CASE WHEN tile_source IS NOT NULL THEN 'processed' ELSE 'pending' END
                 WHERE status = 'skipped_ignored_sport'
-                  AND has_gps = 1
                 """
             )
 

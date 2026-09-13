@@ -11,10 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from tileharvester.config import settings
 from tileharvester.db import get_db
+from tileharvester.history import rebuild_tile_history
 from tileharvester.tile_engine import MAX_LATITUDE, validate_tile_id
 
 MAX_KML_BYTES = 100 * 1024 * 1024
+MAX_RASTER_TILES = 2_000_000
+MAX_SCAN_WORK = 50_000_000
 _LAYER_ZOOMS = {"squadrats": 14, "squadratinhos": 17}
 
 
@@ -92,6 +96,8 @@ def _tiles_inside_ring(text: str, zoom: int) -> set[str]:
     minimum_y = max(0, math.floor(min(y for _, y in points)))
     maximum_y = min(world_width, math.ceil(max(y for _, y in points)))
     tiles: set[str] = set()
+    if (maximum_y - minimum_y) * len(points) > MAX_SCAN_WORK:
+        raise ValueError("KML polygon exceeds the rasterization work limit")
 
     for tile_y in range(minimum_y, maximum_y):
         scan_y = tile_y + 0.5
@@ -106,6 +112,8 @@ def _tiles_inside_ring(text: str, zoom: int) -> set[str]:
         for left, right in zip(intersections[::2], intersections[1::2], strict=True):
             first_x = math.ceil(left - 0.5 - 1e-9)
             last_x = math.floor(right - 0.5 + 1e-9)
+            if len(tiles) + max(0, last_x - first_x + 1) > MAX_RASTER_TILES:
+                raise ValueError("KML polygon exceeds the rasterized tile limit")
             for tile_x in range(first_x, last_x + 1):
                 wrapped_x = tile_x % world_width
                 tiles.add(validate_tile_id(f"{zoom}:{wrapped_x}:{tile_y}"))
@@ -160,9 +168,13 @@ def parse_squadrats_kml(path: Path) -> KmlTileSet:
             raise ValueError(f"Squadrats KML layer {name!r} contains no polygons")
         for polygon in polygons:
             parsed[name].update(_tiles_inside_polygon(polygon, _LAYER_ZOOMS[name]))
+            if len(parsed[name]) > MAX_RASTER_TILES:
+                raise ValueError("KML layer exceeds the rasterized tile limit")
 
     if not found_layers:
         raise ValueError("KML contains neither a 'squadrats' nor a 'squadratinhos' layer")
+    if found_layers != set(_LAYER_ZOOMS):
+        raise ValueError("KML must include both squadrats and squadratinhos layers")
     if "squadrats" not in found_layers or not parsed["squadrats"]:
         raise ValueError("KML contains no exact Squadrats tiles")
 
@@ -193,6 +205,8 @@ def parse_as_of_utc(value: str | None) -> str:
 
 def import_baseline(path: Path, as_of: str | None = None) -> dict[str, Any]:
     """Store one immutable KML baseline and mark unprocessed covered activities."""
+    if (settings.squadrat_zoom, settings.squadratinho_zoom) != (14, 17):
+        raise ValueError("Squadrats KML baselines require zoom levels 14 and 17")
     tiles = parse_squadrats_kml(path)
     as_of_utc = parse_as_of_utc(as_of)
     imported_at = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
@@ -240,9 +254,14 @@ def import_baseline(path: Path, as_of: str | None = None) -> dict[str, Any]:
             """,
             (as_of_utc,),
         )
+        rebuilt = conn.execute(
+            "SELECT COUNT(*) FROM activities WHERE status = 'processed'"
+        ).fetchone()[0]
+        rebuild_tile_history(conn)
         conn.commit()
 
     return {
+        "rebuilt": rebuilt,
         "source_name": path.name,
         "sha256": tiles.sha256,
         "imported_at": imported_at,
@@ -254,7 +273,10 @@ def import_baseline(path: Path, as_of: str | None = None) -> dict[str, Any]:
 
 def get_baseline(conn: sqlite3.Connection) -> sqlite3.Row | None:
     """Return the installed baseline metadata, if any."""
-    return conn.execute("SELECT * FROM baseline_imports WHERE id = 1").fetchone()  # type: ignore[no-any-return]
+    row = conn.execute("SELECT * FROM baseline_imports WHERE id = 1").fetchone()
+    if row is not None and (settings.squadrat_zoom, settings.squadratinho_zoom) != (14, 17):
+        raise ValueError("Installed Squadrats KML baseline requires zoom levels 14 and 17")
+    return row  # type: ignore[no-any-return]
 
 
 def activity_is_covered(conn: sqlite3.Connection, start_utc: str) -> bool:
@@ -370,10 +392,13 @@ def effective_tile_count_through(
     if not activity_uses_baseline(conn, activity):
         current_clause = "OR a.id = ?" if include_activity else ""
         params: tuple[Any, ...] = (
-            (tile_kind, activity["start_local"], activity["id"])
-            if include_activity
-            else (tile_kind, activity["start_local"])
+            tile_kind,
+            activity["start_utc"],
+            activity["start_utc"],
+            activity["id"],
         )
+        if include_activity:
+            params += (activity["id"],)
         return int(
             conn.execute(
                 f"""
@@ -382,7 +407,8 @@ def effective_tile_count_through(
                 JOIN activities a ON a.id = at.activity_id
                 WHERE at.tile_kind = ?
                   AND a.status = 'processed'
-                  AND (a.start_local < ? {current_clause})
+                  AND (julianday(a.start_utc) < julianday(?)
+                       OR (julianday(a.start_utc) = julianday(?) AND a.id < ?) {current_clause})
                 """,
                 params,
             ).fetchone()[0]
@@ -432,7 +458,7 @@ def effective_tile_count_through(
                   )
                   AND (
                       julianday(a.start_utc) < julianday(?)
-                      OR (a.start_utc = ? AND a.id < ?)
+                      OR (julianday(a.start_utc) = julianday(?) AND a.id < ?)
                       {current_clause}
                   )
             )

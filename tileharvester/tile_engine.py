@@ -58,6 +58,13 @@ class SquadratsEngine:
         self.squadratinho_zoom = squadratinho_zoom
 
     def _continuous_tile(self, lat: float, lon: float, zoom: int) -> tuple[float, float]:
+        if (
+            not math.isfinite(lat)
+            or not math.isfinite(lon)
+            or not -180 <= lon <= 180
+            or not -90 <= lat <= 90
+        ):
+            raise ValueError(f"Invalid GPS coordinate: {lat}, {lon}")
         lat = max(min(lat, MAX_LATITUDE), -MAX_LATITUDE)
         n = 2**zoom
         x = (lon + 180.0) / 360.0 * n
@@ -121,6 +128,11 @@ class SquadratsEngine:
         t_max_y = (next_y - y0) / dy if dy else math.inf
 
         while tx != end_tx or ty != end_ty:
+            # A negative-direction crossing exactly at the endpoint must not
+            # step past floor(endpoint), which would make traversal unbounded.
+            if min(t_max_x, t_max_y) >= 1.0:
+                tiles.add(self._tile_id(end_tx, end_ty, zoom))
+                break
             if t_max_x < t_max_y:
                 tx += step_x
                 t_max_x += t_delta_x

@@ -20,7 +20,7 @@ def refine_streams(limit: int | None = None, force: bool = False) -> dict[str, A
     params: list[object] = []
     ignored_sports = sorted(settings.ignored_sports)
     if ignored_sports:
-        filters.append(f"sport_type NOT IN ({','.join('?' for _ in ignored_sports)})")
+        filters.append(f"COALESCE(sport_type, '') NOT IN ({','.join('?' for _ in ignored_sports)})")
         params.extend(ignored_sports)
     if not force:
         filters.append("COALESCE(tile_source, '') != ?")

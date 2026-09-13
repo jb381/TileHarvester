@@ -8,7 +8,7 @@ from tileharvester.config import settings
 def _get_line_pattern() -> re.Pattern[str]:
     """Build the TileHarvester line regex from current settings (allows runtime changes)."""
     return re.compile(
-        rf"^.*\b{re.escape(settings.description_prefix)}:\s.*$",
+        rf"^[^\w\n]*{re.escape(settings.description_prefix)}:[ \t].*$",
         re.MULTILINE,
     )
 

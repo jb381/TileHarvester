@@ -69,7 +69,7 @@ def test_novelty_rebuild_rolls_back_on_failure(isolated_db, monkeypatch) -> None
         conn.commit()
     monkeypatch.setattr(
         recompute_mod,
-        "_prior_activity_tiles",
+        "rebuild_tile_history",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("broken rebuild")),
     )
 

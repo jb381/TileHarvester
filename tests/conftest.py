@@ -15,3 +15,15 @@ def isolated_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(settings, "rewrite_existing_annotations", False)
     migrate()
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def protect_user_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+
+    def block_request(*_args, **_kwargs):
+        raise AssertionError("Tests must mock HTTP requests")
+
+    monkeypatch.setattr(httpx.Client, "send", block_request)

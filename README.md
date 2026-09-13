@@ -20,7 +20,7 @@ Your friends will know you're grinding tiles 🚴‍♂️🏃‍♀️
 
 ```bash
 # 1. grab it
-git clone https://github.com/jb381/TileHarvester.git && cd tileharvester
+git clone https://github.com/jb381/TileHarvester.git && cd TileHarvester
 uv sync
 
 # 2. grab Strava creds → https://www.strava.com/settings/api
@@ -43,7 +43,7 @@ Then either leave `uv run tileharvester sync` running, or use Docker/systemd for
 
 ```bash
 # 1. grab it
-git clone https://github.com/jb381/TileHarvester.git && cd tileharvester
+git clone https://github.com/jb381/TileHarvester.git && cd TileHarvester
 
 # 2. create your env
 cp .env.example .env
@@ -173,3 +173,32 @@ That only adjusts the lifetime total shown in descriptions. Weekly and monthly c
 ## License 📄
 
 MIT — use it, fork it, whatever.
+
+## Recovery and validation
+
+A failed processing attempt is retried by the next sync. Failed annotations are
+retried while the activity is still inside the annotation window; use
+`tileharvester retry` for older failures. `sync --once` exits nonzero if any
+processing or annotation failed.
+
+Refinement preserves existing tiles if Strava is unavailable or returns no usable
+GPS data. Retry refinement after resolving the error. Routes over the configured
+point limit fail explicitly rather than saving a truncated route; raise
+`TH_STREAM_MAX_POINTS` (default 50,000) and retry if needed.
+
+KML baselines require both Squadrats and Squadratinhos layers and the standard
+z14/z17 zooms. Import and novelty rebuilding are atomic. Rasterization has limits
+of 2,000,000 tiles per layer and 50,000,000 scan operations per ring; unusually large
+or complex exports may be rejected without changing the database.
+
+For development:
+
+```bash
+uv sync --frozen
+uv run pytest --cov=tileharvester
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy tileharvester
+```
+
+See [the project review](docs/project-review.md) for findings, fixes, and test limits.
