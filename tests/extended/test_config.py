@@ -5,6 +5,12 @@ import pytest
 from tileharvester.config import DEFAULT_DATA_DIR, Settings
 
 
+def test_kml_module_uses_isolated_settings(temp_settings):
+    import tileharvester.kml_baseline as kml_baseline_mod
+
+    assert kml_baseline_mod.settings is temp_settings
+
+
 class TestSettingsDefaults:
     def test_default_data_dir(self):
         settings = Settings(strava_client_id="id", strava_client_secret="secret")

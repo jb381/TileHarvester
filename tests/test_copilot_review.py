@@ -83,6 +83,27 @@ def test_historical_processed_count_matches_utc_order(isolated_db):
     assert result["processed_before"] == 1
 
 
+def test_historical_novelty_uses_local_order_without_candidate_utc(isolated_db):
+    point = _tile_center(8000, 6000, 14)
+    tile_id = "14:8000:6000"
+    _insert_activity(1, "2026-08-01T09:00:00Z", status="processed")
+    store(1, point)
+    with get_db() as conn:
+        conn.execute("UPDATE activities SET start_local = '2026-08-01T12:00:00' WHERE id = 1")
+        conn.commit()
+
+    result = sync.compute_historical_novelty(
+        2,
+        "2026-08-01T11:00:00",
+        {tile_id},
+        set(),
+    )
+
+    assert result["processed_before"] == 0
+    assert result["seen_squadrats"] == 0
+    assert result["new_squadrats"] == 1
+
+
 def test_eligibility_and_history_rollback_together(isolated_db, monkeypatch):
     _insert_activity(1, "2026-08-01T10:00:00Z")
     store(1, _tile_center(8000, 6000, 14))

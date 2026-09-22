@@ -39,6 +39,7 @@ def isolate_settings(temp_settings: Settings, monkeypatch) -> Settings:
     import tileharvester.config as config_mod
     import tileharvester.db as db_mod
     import tileharvester.descriptions as descriptions_mod
+    import tileharvester.kml_baseline as kml_baseline_mod
     import tileharvester.recompute as recompute_mod
     import tileharvester.refine as refine_mod
     import tileharvester.strava_client as strava_client_mod
@@ -52,6 +53,7 @@ def isolate_settings(temp_settings: Settings, monkeypatch) -> Settings:
         config_mod,
         db_mod,
         descriptions_mod,
+        kml_baseline_mod,
         recompute_mod,
         refine_mod,
         strava_client_mod,

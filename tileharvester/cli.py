@@ -391,7 +391,12 @@ def recompute() -> None:
     """Recompute global tile novelty from stored activity tiles."""
     typer.echo("Recomputing global tiles...")
     result = recompute_all()
-    typer.echo(f"Rebuilt {result['rebuilt']} activities, {result.get('preserved', 0)} preserved")
+    typer.echo(
+        f"Rebuilt {result['rebuilt']} activities, {result.get('preserved', 0)} preserved, "
+        f"{result.get('failed', 0)} failed"
+    )
+    if result.get("failed", 0):
+        raise typer.Exit(1)
 
 
 @app.command()

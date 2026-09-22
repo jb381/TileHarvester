@@ -94,6 +94,7 @@ def recompute_all() -> dict[str, Any]:
     print(f"Recomputing {to_recompute} activities ({refined} stream-refined preserved)...")
     rebuilt = 0
     skipped = 0
+    failed = 0
     for row in track(rows_to_recompute, description="Recomputing", disable=not rows_to_recompute):
         summary = row["summary_polyline"]
         if not summary:
@@ -108,11 +109,20 @@ def recompute_all() -> dict[str, Any]:
             skipped += 1
             continue
 
-        _store_activity_tiles(row, points, "summary_polyline")
-        rebuilt += 1
+        result = _store_activity_tiles(row, points, "summary_polyline")
+        if result["status"] == "processed":
+            rebuilt += 1
+        elif result["status"] == "skipped_no_gps":
+            skipped += 1
+        else:
+            failed += 1
+            print(f"Activity {row['id']} failed: {result.get('error', result['status'])}")
 
     print("Rebuilding global totals from all stored tiles...")
     recompute_novelty_from_stored_tiles()
 
-    print(f"Recompute complete: {rebuilt} rebuilt, {refined} preserved, {skipped} skipped.")
-    return {"rebuilt": rebuilt, "preserved": refined, "skipped": skipped}
+    print(
+        f"Recompute complete: {rebuilt} rebuilt, {refined} preserved, "
+        f"{skipped} skipped, {failed} failed."
+    )
+    return {"rebuilt": rebuilt, "preserved": refined, "skipped": skipped, "failed": failed}

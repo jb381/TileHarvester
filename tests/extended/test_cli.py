@@ -177,6 +177,20 @@ class TestRecompute:
         result = runner.invoke(app, ["recompute"])
         assert result.exit_code == 0
 
+    def test_recompute_exits_nonzero_when_an_activity_fails(self, monkeypatch):
+        import tileharvester.cli as cli_mod
+
+        monkeypatch.setattr(
+            cli_mod,
+            "recompute_all",
+            lambda: {"rebuilt": 0, "preserved": 1, "skipped": 0, "failed": 1},
+        )
+
+        result = runner.invoke(app, ["recompute"])
+
+        assert result.exit_code == 1
+        assert "1 failed" in result.stdout
+
 
 class TestService:
     def test_service_print(self):

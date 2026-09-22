@@ -396,27 +396,35 @@ def _prior_activity_tiles(
                 ),
             ).fetchall()
         else:
-            rows = conn.execute(
-                f"""
-                SELECT DISTINCT at.tile_id
-                FROM activity_tiles at
-                JOIN activities a ON a.id = at.activity_id
-                WHERE at.tile_kind = ?
-                  AND a.status = 'processed'
-                  AND a.id != ?
-                  AND (julianday(a.start_utc) < julianday(?)
-                       OR (julianday(a.start_utc) = julianday(?) AND a.id < ?))
-                  AND at.tile_id IN ({placeholders})
-                """,
-                (
-                    tile_kind,
-                    activity_id,
-                    start_utc or start_local,
-                    start_utc or start_local,
-                    activity_id,
-                    *chunk,
-                ),
-            ).fetchall()
+            if start_utc is not None:
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT at.tile_id
+                    FROM activity_tiles at
+                    JOIN activities a ON a.id = at.activity_id
+                    WHERE at.tile_kind = ?
+                      AND a.status = 'processed'
+                      AND a.id != ?
+                      AND (julianday(a.start_utc) < julianday(?)
+                           OR (julianday(a.start_utc) = julianday(?) AND a.id < ?))
+                      AND at.tile_id IN ({placeholders})
+                    """,
+                    (tile_kind, activity_id, start_utc, start_utc, activity_id, *chunk),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT at.tile_id
+                    FROM activity_tiles at
+                    JOIN activities a ON a.id = at.activity_id
+                    WHERE at.tile_kind = ?
+                      AND a.status = 'processed'
+                      AND a.id != ?
+                      AND (a.start_local < ? OR (a.start_local = ? AND a.id < ?))
+                      AND at.tile_id IN ({placeholders})
+                    """,
+                    (tile_kind, activity_id, start_local, start_local, activity_id, *chunk),
+                ).fetchall()
         seen.update(r["tile_id"] for r in rows)
     if use_baseline:
         seen.update(baseline_tiles_on_route(conn, tile_kind, tiles))
@@ -450,8 +458,9 @@ def compute_historical_novelty(
             ).fetchone()[0]
         else:
             processed_before = conn.execute(
-                "SELECT COUNT(*) FROM activities WHERE status = 'processed' AND start_local < ?",
-                (start_local,),
+                """SELECT COUNT(*) FROM activities WHERE status = 'processed'
+                   AND (start_local < ? OR (start_local = ? AND id < ?))""",
+                (start_local, start_local, activity_id),
             ).fetchone()[0]
         if activity is not None:
             total_squadrats_before = effective_tile_count_through(
@@ -468,9 +477,9 @@ def compute_historical_novelty(
                 JOIN activities a ON a.id = at.activity_id
                 WHERE at.tile_kind = 'squadrat'
                   AND a.status = 'processed'
-                  AND a.start_local < ?
+                  AND (a.start_local < ? OR (a.start_local = ? AND a.id < ?))
                 """,
-                (start_local,),
+                (start_local, start_local, activity_id),
             ).fetchone()[0]
             total_squadratinhos_before = conn.execute(
                 """
@@ -479,9 +488,9 @@ def compute_historical_novelty(
                 JOIN activities a ON a.id = at.activity_id
                 WHERE at.tile_kind = 'squadratinho'
                   AND a.status = 'processed'
-                  AND a.start_local < ?
+                  AND (a.start_local < ? OR (a.start_local = ? AND a.id < ?))
                 """,
-                (start_local,),
+                (start_local, start_local, activity_id),
             ).fetchone()[0]
         seen_squadrats = _prior_activity_tiles(
             conn,
