@@ -11,6 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from defusedxml.common import DefusedXmlException
+from defusedxml.ElementTree import fromstring as parse_xml
+
 from tileharvester.config import settings
 from tileharvester.db import get_db
 from tileharvester.history import rebuild_tile_history
@@ -149,9 +152,15 @@ def parse_squadrats_kml(path: Path) -> KmlTileSet:
     if path.stat().st_size > MAX_KML_BYTES:
         raise ValueError(f"KML file exceeds the {MAX_KML_BYTES // (1024 * 1024)} MiB safety limit")
 
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    with path.open("rb") as source:
+        payload = source.read(MAX_KML_BYTES + 1)
+    if len(payload) > MAX_KML_BYTES:
+        raise ValueError("KML file exceeds the size safety limit")
+    digest = hashlib.sha256(payload).hexdigest()
     try:
-        root = ET.parse(path).getroot()
+        root = parse_xml(payload, forbid_dtd=True, forbid_entities=True, forbid_external=True)
+    except DefusedXmlException as exc:
+        raise ValueError(f"Unsafe KML XML: {exc}") from exc
     except ET.ParseError as exc:
         raise ValueError(f"Invalid KML XML: {exc}") from exc
 

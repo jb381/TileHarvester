@@ -51,7 +51,11 @@ def test_migration_adds_optional_kml_baseline_schema(isolated_db) -> None:
 
 def test_migration_upgrades_database_created_before_kml_support(isolated_db) -> None:
     del isolated_db
-    old_version = len(MIGRATIONS) - 2
+    old_version = next(
+        i
+        for i, migration in enumerate(MIGRATIONS)
+        if "CREATE TABLE IF NOT EXISTS baseline_imports" in migration
+    )
     with get_db() as conn:
         conn.execute("DROP TABLE baseline_tiles")
         conn.execute("DROP TABLE baseline_imports")

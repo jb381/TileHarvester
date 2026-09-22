@@ -114,6 +114,10 @@ MIGRATIONS = [
     ALTER TABLE activities
     ADD COLUMN baseline_covered INTEGER NOT NULL DEFAULT 0;
     """,
+    """
+    ALTER TABLE activities
+    ADD COLUMN stream_refresh_pending INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 

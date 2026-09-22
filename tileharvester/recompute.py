@@ -73,6 +73,9 @@ def recompute_all() -> dict[str, Any]:
                 """
             )
 
+        # Eligibility changes and their counts must become visible together,
+        # even if later route recomputation fails or the process is interrupted.
+        rebuild_tile_history(conn)
         conn.commit()
 
         rows = conn.execute(

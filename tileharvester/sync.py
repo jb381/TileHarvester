@@ -66,7 +66,11 @@ def _parse_utc(utc_str: str) -> datetime:
 def _latest_stored_activity_utc() -> datetime | None:
     """Return the newest activity timestamp available in the local database."""
     with get_db() as conn:
-        value = conn.execute("SELECT MAX(start_utc) FROM activities").fetchone()[0]
+        row = conn.execute(
+            "SELECT start_utc FROM activities WHERE julianday(start_utc) IS NOT NULL "
+            "ORDER BY julianday(start_utc) DESC, id DESC LIMIT 1"
+        ).fetchone()
+        value = row[0] if row else None
     if not value:
         return None
     try:
@@ -133,8 +137,21 @@ def clean_stream_segments(
     streams: dict[str, Any],
 ) -> tuple[list[list[tuple[float, float]]], dict[str, Any]]:
     """Build route segments from Strava streams, splitting implausible GPS jumps."""
-    latlng = streams.get("latlng", {}).get("data", [])
-    times = streams.get("time", {}).get("data", [])
+    if not isinstance(streams, dict):
+        raise ValueError("GPS streams must be an object")
+
+    def data_for(key: str) -> list[Any]:
+        if key not in streams:
+            return []
+        stream = streams[key]
+        if not isinstance(stream, dict) or not isinstance(stream.get("data"), list):
+            raise ValueError(f"GPS {key} stream must contain a data array")
+        return stream["data"]  # type: ignore[no-any-return]
+
+    latlng = data_for("latlng")
+    times = data_for("time")
+    if any(not isinstance(t, int | float) or not math.isfinite(t) for t in times):
+        raise ValueError("GPS time stream must contain finite numbers")
 
     # Edge case: empty stream
     if not latlng:
@@ -153,6 +170,8 @@ def clean_stream_segments(
     split_count = 0
 
     for i, point in enumerate(latlng):
+        if not isinstance(point, list | tuple) or len(point) != 2:
+            raise ValueError("GPS coordinates must be latitude/longitude pairs")
         current_point = (float(point[0]), float(point[1]))
         lat, lon = current_point
         if (
@@ -259,14 +278,17 @@ def _store_summary(conn: sqlite3.Connection, activity: dict[str, Any]) -> tuple[
         status = "processed" if existing["tile_source"] else "pending"
     elif status == "skipped_no_gps" and summary and summary != existing["summary_polyline"]:
         status = "pending"
+    refresh_pending = bool(existing["stream_refresh_pending"])
+    if status == "processed" and summary and summary != existing["summary_polyline"]:
+        refresh_pending = True
     conn.execute(
         """
-        UPDATE activities SET sport_type = ?, status = ?,
+        UPDATE activities SET sport_type = ?, status = ?, stream_refresh_pending = ?,
             summary_polyline = COALESCE(?, summary_polyline),
             has_gps = CASE WHEN ? IS NOT NULL THEN 1 ELSE has_gps END
         WHERE id = ?
         """,
-        (sport_type, status, summary, summary, aid),
+        (sport_type, status, int(refresh_pending), summary, summary, aid),
     )
     if status != existing["status"]:
         affected: dict[str, set[str]] = {"squadrat": set(), "squadratinho": set()}
@@ -419,10 +441,18 @@ def compute_historical_novelty(
             ).fetchone()
         use_baseline = bool(activity and activity_uses_baseline(conn, activity))
         start_utc = activity["start_utc"] if activity else start_utc
-        processed_before = conn.execute(
-            "SELECT COUNT(*) FROM activities WHERE status = 'processed' AND start_local < ?",
-            (start_local,),
-        ).fetchone()[0]
+        if start_utc is not None:
+            processed_before = conn.execute(
+                """SELECT COUNT(*) FROM activities WHERE status = 'processed'
+                   AND (julianday(start_utc) < julianday(?)
+                        OR (julianday(start_utc) = julianday(?) AND id < ?))""",
+                (start_utc, start_utc, activity_id),
+            ).fetchone()[0]
+        else:
+            processed_before = conn.execute(
+                "SELECT COUNT(*) FROM activities WHERE status = 'processed' AND start_local < ?",
+                (start_local,),
+            ).fetchone()[0]
         if activity is not None:
             total_squadrats_before = effective_tile_count_through(
                 conn, "squadrat", activity, include_activity=False
@@ -531,7 +561,8 @@ def _store_activity_tiles(
             SET status = ?, squadrat_count = ?, squadratinho_count = ?,
                 new_squadrat_count = ?, new_squadratinho_count = ?,
                 processed_at = ?, tile_engine = ?, tile_source = ?, has_gps = 1,
-                last_error = NULL
+                last_error = NULL,
+                stream_refresh_pending = CASE WHEN ? = 'streams_clean' THEN 0 ELSE stream_refresh_pending END
             WHERE id = ?
             """,
             (
@@ -542,6 +573,7 @@ def _store_activity_tiles(
                 0,
                 datetime.now(tz=timezone.utc).isoformat(),
                 engine.id,
+                source,
                 source,
                 activity_id,
             ),
@@ -690,7 +722,10 @@ def sync_once() -> dict[str, Any]:
     # Process all pending (tile computation)
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id FROM activities WHERE status IN ('pending', 'failed') ORDER BY julianday(start_utc), id"
+            """SELECT id FROM activities
+               WHERE status IN ('pending', 'failed')
+                  OR (status = 'processed' AND stream_refresh_pending = 1)
+               ORDER BY julianday(start_utc), id"""
         ).fetchall()
 
     processed = 0
@@ -713,6 +748,7 @@ def sync_once() -> dict[str, Any]:
             """
             SELECT id FROM activities
             WHERE status = 'processed'
+              AND stream_refresh_pending = 0
               AND (annotation_status IS NULL OR annotation_status IN ('none', 'failed'))
               AND (julianday(start_utc) >= julianday(?) OR ?)
             ORDER BY start_utc, id
@@ -748,7 +784,9 @@ def retry_failed() -> dict[str, Any]:
 
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id FROM activities WHERE status = 'failed' ORDER BY julianday(start_utc), id"
+            """SELECT id FROM activities WHERE status = 'failed'
+               OR (status = 'processed' AND stream_refresh_pending = 1)
+               ORDER BY julianday(start_utc), id"""
         ).fetchall()
 
     total_failed = len(rows)

@@ -7,8 +7,16 @@ from tileharvester.config import settings
 
 def _get_line_pattern() -> re.Pattern[str]:
     """Build the TileHarvester line regex from current settings (allows runtime changes)."""
+    # Permit the configured marker and historical emoji markers, not arbitrary
+    # punctuation that could introduce ordinary prose (e.g. an em dash or quote).
+    emoji = r"[\u2600-\u27bf\U0001f000-\U0001faff][\u2600-\u27bf\U0001f000-\U0001faff\ufe0f\u200d]*"
+    marker = (
+        f"(?:{re.escape(settings.description_emoji)}|{emoji})"
+        if settings.description_emoji
+        else emoji
+    )
     return re.compile(
-        rf"^[^\w\n]*{re.escape(settings.description_prefix)}:[ \t].*$",
+        rf"^[ \t]*(?:{marker}[ \t]+)?{re.escape(settings.description_prefix)}:[ \t].*$",
         re.MULTILINE,
     )
 
