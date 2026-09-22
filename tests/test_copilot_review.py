@@ -25,6 +25,8 @@ from tileharvester.kml_baseline import effective_tile_count, parse_squadrats_kml
         {"latlng": {"data": [{"lat": 52, "lon": 5}]}},
         {"time": None},
         {"latlng": {"data": [[52, 5], [52, 5]]}, "time": {"data": [None, {}]}},
+        {"latlng": {"data": [[52, 5], [52, 5]]}, "time": {"data": [10**1000, 0]}},
+        {"latlng": {"data": [[10**1000, 5], [52, 5]]}},
     ],
 )
 def test_malformed_stream_is_failed_without_aborting(isolated_db, monkeypatch, payload):

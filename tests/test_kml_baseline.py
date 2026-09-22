@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 import tileharvester.sync as sync_mod
 from tileharvester.cli import app
+from tileharvester.config import settings
 from tileharvester.db import get_db
 from tileharvester.kml_baseline import (
     activity_uses_baseline,
@@ -224,6 +225,17 @@ def test_compare_is_read_only(isolated_db: Path, tmp_path: Path) -> None:
         "kml_only": 0,
         "local_only": 0,
     }
+
+
+def test_compare_rejects_custom_zooms_without_baseline(
+    isolated_db: Path, tmp_path: Path, monkeypatch
+) -> None:
+    del isolated_db
+    path = _write_fixture(tmp_path / "squadrats.kml")
+    monkeypatch.setattr(settings, "squadrat_zoom", 13)
+
+    with pytest.raises(ValueError, match="requires zoom levels 14 and 17"):
+        compare_kml(path)
 
 
 def test_cli_import_and_compare(isolated_db: Path, tmp_path: Path) -> None:

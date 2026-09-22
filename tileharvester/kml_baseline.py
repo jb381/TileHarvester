@@ -479,6 +479,8 @@ def effective_tile_count_through(
 
 def compare_kml(path: Path) -> dict[str, dict[str, int]]:
     """Compare a KML export with the current effective local tile sets."""
+    if (settings.squadrat_zoom, settings.squadratinho_zoom) != (14, 17):
+        raise ValueError("Squadrats KML comparison requires zoom levels 14 and 17")
     exported = parse_squadrats_kml(path)
     result: dict[str, dict[str, int]] = {}
     with get_db() as conn:

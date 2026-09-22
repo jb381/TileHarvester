@@ -150,7 +150,11 @@ def clean_stream_segments(
 
     latlng = data_for("latlng")
     times = data_for("time")
-    if any(not isinstance(t, int | float) or not math.isfinite(t) for t in times):
+    try:
+        invalid_time = any(not isinstance(t, int | float) or not math.isfinite(t) for t in times)
+    except OverflowError as exc:
+        raise ValueError("GPS time stream must contain finite numbers") from exc
+    if invalid_time:
         raise ValueError("GPS time stream must contain finite numbers")
 
     # Edge case: empty stream
@@ -172,7 +176,10 @@ def clean_stream_segments(
     for i, point in enumerate(latlng):
         if not isinstance(point, list | tuple) or len(point) != 2:
             raise ValueError("GPS coordinates must be latitude/longitude pairs")
-        current_point = (float(point[0]), float(point[1]))
+        try:
+            current_point = (float(point[0]), float(point[1]))
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ValueError("GPS coordinates must be finite numbers") from exc
         lat, lon = current_point
         if (
             not math.isfinite(lat)
