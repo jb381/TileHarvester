@@ -1,6 +1,8 @@
 """Strava API client with OAuth and token refresh."""
 
 import json
+import os
+import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -157,7 +159,19 @@ def _token_file() -> Path:
 
 def _save_tokens(data: dict[str, Any]) -> None:
     settings.ensure_dirs()
-    _token_file().write_text(json.dumps(data, indent=2))
+    path = _token_file()
+    # mkstemp uses mode 0600; atomic replacement preserves the old refresh token
+    # if serialization or writing fails, and never exposes partially written JSON.
+    payload = json.dumps(data, indent=2)
+    descriptor, temporary = tempfile.mkstemp(prefix=".strava-tokens-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w") as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def _load_tokens() -> dict[str, Any] | None:
@@ -234,17 +248,27 @@ def _headers() -> dict[str, Any]:
 
 
 def _rate_limit_sleep(response: httpx.Response) -> None:
-    """Respect Strava rate limits."""
-    rate_limit = _parse_rate_limit_headers(response.headers)
-    daily_limit = rate_limit["daily_limit"]
-    daily_used = rate_limit["daily_used"]
-    if (
-        daily_limit is not None
-        and daily_used is not None
-        and daily_used >= daily_limit - settings.rate_limit_buffer
-    ):
-        print(f"Rate limit close: {daily_used}/{daily_limit}. Sleeping 15 minutes.")
-        time.sleep(900)
+    """Respect both overall and non-upload limits at their actual UTC resets."""
+    now = time.time()
+    delay = 0.0
+    for prefix in ("X-RateLimit", "X-ReadRateLimit"):
+        parsed = _parse_rate_limit_headers(
+            httpx.Headers(
+                {
+                    "X-RateLimit-Limit": response.headers.get(f"{prefix}-Limit", ""),
+                    "X-RateLimit-Usage": response.headers.get(f"{prefix}-Usage", ""),
+                }
+            )
+        )
+        for window, seconds in (("fifteen_min", 900), ("daily", 86400)):
+            limit, used = parsed[f"{window}_limit"], parsed[f"{window}_used"]
+            if limit is not None and used is not None and limit > 0:
+                buffer = min(max(settings.rate_limit_buffer, 0), limit - 1)
+                if used >= limit - buffer:
+                    delay = max(delay, seconds - now % seconds + 1)
+    if delay:
+        print(f"Strava rate limit close; waiting {delay:.0f}s for the reset.")
+        time.sleep(delay)
 
 
 def get_athlete() -> dict[str, Any]:

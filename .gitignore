@@ -23,3 +23,7 @@ build/
 *~
 findings.md
 .codex
+
+.coverage
+coverage.xml
+htmlcov/

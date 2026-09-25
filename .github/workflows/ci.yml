@@ -38,20 +38,25 @@ jobs:
         run: uv run mypy tileharvester
 
   test:
-    name: Pytest
+    name: Pytest (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12", "3.14"]
     steps:
       - uses: actions/checkout@v7
       - name: Install uv
         uses: astral-sh/setup-uv@v7
       - name: Install Python
-        run: uv python install
+        run: uv python install ${{ matrix.python-version }}
       - name: Install dependencies
-        run: uv sync --group dev
+        run: uv sync --frozen --group dev --python ${{ matrix.python-version }}
       - name: Run tests (excluding e2e)
-        run: uv run pytest -m "not e2e" --ignore=tests/e2e --ignore=test_e2e.py -v
+        run: uv run pytest --cov=tileharvester --cov-report=term-missing -v
 
       - name: Audit dependencies for CVEs
+        if: matrix.python-version == '3.12'
         run: |
           uv export --frozen --no-dev --no-emit-project --output-file=/tmp/requirements.txt
           uv pip install pip-audit

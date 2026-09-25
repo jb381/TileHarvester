@@ -9,7 +9,15 @@ import polyline
 from rich.progress import track
 
 from tileharvester.config import settings
-from tileharvester.db import get_db
+from tileharvester.db import get_db, get_setting, set_setting
+from tileharvester.history import rebuild_tile_history
+from tileharvester.kml_baseline import (
+    activity_is_covered,
+    activity_uses_baseline,
+    baseline_tiles_on_route,
+    effective_tile_count_through,
+    get_baseline,
+)
 from tileharvester.strava_client import (
     classify_strava_error,
     get_activities,
@@ -17,14 +25,21 @@ from tileharvester.strava_client import (
 )
 from tileharvester.tile_engine import make_engine
 
+_LAST_SUCCESSFUL_SYNC_KEY = "last_successful_sync_at"
+
 
 def _week_start(dt: datetime) -> datetime:
     """ISO week start (Monday)."""
-    return dt - timedelta(days=dt.weekday())
+    return (dt - timedelta(days=dt.weekday())).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
 
 
 def _month_start(dt: datetime) -> datetime:
-    return dt.replace(day=1)
+    return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
 def _parse_local(local_str: str) -> datetime:
@@ -37,6 +52,58 @@ def _parse_local(local_str: str) -> datetime:
     if ":" in local_str and local_str.count("-") > 2:
         local_str = local_str[: local_str.rfind("-", 0, local_str.rfind(":"))]
     return datetime.fromisoformat(local_str)
+
+
+def _parse_utc(utc_str: str) -> datetime:
+    """Parse an ISO timestamp and normalize it to UTC."""
+    normalized = utc_str[:-1] + "+00:00" if utc_str.endswith("Z") else utc_str
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _latest_stored_activity_utc() -> datetime | None:
+    """Return the newest activity timestamp available in the local database."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT start_utc FROM activities WHERE julianday(start_utc) IS NOT NULL "
+            "ORDER BY julianday(start_utc) DESC, id DESC LIMIT 1"
+        ).fetchone()
+        value = row[0] if row else None
+    if not value:
+        return None
+    try:
+        return _parse_utc(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sync_after_timestamp(sync_started_at: datetime) -> int:
+    """Choose a resilient Strava fetch boundary with an overlap window.
+
+    Prefer the last successful poll so a server catches up after downtime.
+    Existing installations without a cursor fall back to the newest locally
+    stored activity. Empty databases retain the normal configured lookback.
+    """
+    if sync_started_at.tzinfo is None:
+        sync_started_at = sync_started_at.replace(tzinfo=timezone.utc)
+    else:
+        sync_started_at = sync_started_at.astimezone(timezone.utc)
+
+    anchor: datetime | None = None
+    cursor = get_setting(_LAST_SUCCESSFUL_SYNC_KEY)
+    if isinstance(cursor, str):
+        try:
+            anchor = _parse_utc(cursor)
+        except ValueError:
+            anchor = None
+    if anchor is None:
+        anchor = _latest_stored_activity_utc()
+
+    # Do not let corrupt or future timestamps skip the current polling window.
+    anchor = min(anchor or sync_started_at, sync_started_at)
+    return int((anchor - timedelta(days=settings.sync_lookback_days)).timestamp())
 
 
 def _summary_polyline(activity: dict[str, Any]) -> str | None:
@@ -70,23 +137,36 @@ def clean_stream_segments(
     streams: dict[str, Any],
 ) -> tuple[list[list[tuple[float, float]]], dict[str, Any]]:
     """Build route segments from Strava streams, splitting implausible GPS jumps."""
-    latlng = streams.get("latlng", {}).get("data", [])
-    times = streams.get("time", {}).get("data", [])
+    if not isinstance(streams, dict):
+        raise ValueError("GPS streams must be an object")
+
+    def data_for(key: str) -> list[Any]:
+        if key not in streams:
+            return []
+        stream = streams[key]
+        if not isinstance(stream, dict) or not isinstance(stream.get("data"), list):
+            raise ValueError(f"GPS {key} stream must contain a data array")
+        return stream["data"]  # type: ignore[no-any-return]
+
+    latlng = data_for("latlng")
+    times = data_for("time")
+    try:
+        invalid_time = any(not isinstance(t, int | float) or not math.isfinite(t) for t in times)
+    except OverflowError as exc:
+        raise ValueError("GPS time stream must contain finite numbers") from exc
+    if invalid_time:
+        raise ValueError("GPS time stream must contain finite numbers")
 
     # Edge case: empty stream
     if not latlng:
         return [], {"points": 0, "segments": 0, "splits": 0, "truncated": False}
 
-    # Edge case: excessively long stream, truncate with warning
-    truncated = False
     if len(latlng) > settings.stream_max_points:
-        print(
-            f"Warning: stream has {len(latlng)} points, truncating to {settings.stream_max_points}"
+        raise ValueError(
+            f"GPS stream has {len(latlng)} points, exceeding TH_STREAM_MAX_POINTS="
+            f"{settings.stream_max_points}; increase the limit and retry"
         )
-        latlng = latlng[: settings.stream_max_points]
-        if len(times) > settings.stream_max_points:
-            times = times[: settings.stream_max_points]
-        truncated = True
+    truncated = False
 
     has_times = len(times) == len(latlng)
     segments: list[list[tuple[float, float]]] = []
@@ -94,7 +174,20 @@ def clean_stream_segments(
     split_count = 0
 
     for i, point in enumerate(latlng):
-        current_point = (point[0], point[1])
+        if not isinstance(point, list | tuple) or len(point) != 2:
+            raise ValueError("GPS coordinates must be latitude/longitude pairs")
+        try:
+            current_point = (float(point[0]), float(point[1]))
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ValueError("GPS coordinates must be finite numbers") from exc
+        lat, lon = current_point
+        if (
+            not math.isfinite(lat)
+            or not math.isfinite(lon)
+            or not -90 <= lat <= 90
+            or not -180 <= lon <= 180
+        ):
+            raise ValueError("GPS stream contains an invalid coordinate")
         if not current:
             current.append(current_point)
             continue
@@ -151,6 +244,69 @@ def clean_stream_segments(
     }
 
 
+def _store_summary(conn: sqlite3.Connection, activity: dict[str, Any]) -> tuple[bool, bool]:
+    """Store metadata and reconcile changes to sport eligibility.
+
+    Returns (inserted, ignored). A previously checked empty GPS stream is only
+    queued again when new route metadata arrives, avoiding repeated stream calls.
+    """
+    aid = activity["id"]
+    summary = _summary_polyline(activity)
+    sport_type = activity.get("sport_type", "")
+    ignored = _is_ignored_sport(sport_type)
+    existing = conn.execute("SELECT * FROM activities WHERE id = ?", (aid,)).fetchone()
+    if existing is None:
+        conn.execute(
+            """
+            INSERT INTO activities
+                (id, start_utc, start_local, timezone, sport_type, summary_polyline,
+                 has_gps, status, tile_engine, baseline_covered)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                aid,
+                activity["start_date"],
+                activity["start_date_local"],
+                activity.get("timezone", ""),
+                sport_type,
+                summary,
+                int(bool(summary)),
+                _pending_status(sport_type),
+                make_engine().id,
+                int(activity_is_covered(conn, activity["start_date"])),
+            ),
+        )
+        return True, ignored
+
+    status = existing["status"]
+    if ignored:
+        status = "skipped_ignored_sport"
+    elif status == "skipped_ignored_sport":
+        status = "processed" if existing["tile_source"] else "pending"
+    elif status == "skipped_no_gps" and summary and summary != existing["summary_polyline"]:
+        status = "pending"
+    refresh_pending = bool(existing["stream_refresh_pending"])
+    if status == "processed" and summary and summary != existing["summary_polyline"]:
+        refresh_pending = True
+    conn.execute(
+        """
+        UPDATE activities SET sport_type = ?, status = ?, stream_refresh_pending = ?,
+            summary_polyline = COALESCE(?, summary_polyline),
+            has_gps = CASE WHEN ? IS NOT NULL THEN 1 ELSE has_gps END
+        WHERE id = ?
+        """,
+        (sport_type, status, int(refresh_pending), summary, summary, aid),
+    )
+    if status != existing["status"]:
+        affected: dict[str, set[str]] = {"squadrat": set(), "squadratinho": set()}
+        for row in conn.execute(
+            "SELECT tile_kind, tile_id FROM activity_tiles WHERE activity_id = ?", (aid,)
+        ):
+            affected[row["tile_kind"]].add(row["tile_id"])
+        rebuild_tile_history(conn, affected)
+    return False, ignored
+
+
 def fetch_and_store_summaries(
     page: int = 1,
     per_page: int = 200,
@@ -165,66 +321,11 @@ def fetch_and_store_summaries(
         updated = 0
         skipped = 0
         ignored = 0
-        for a in activities:
-            aid = a["id"]
-            summary = _summary_polyline(a)
-            sport_type = a.get("sport_type", "")
-            has_gps = bool(summary)
-            status = _pending_status(sport_type)
-            existing = conn.execute(
-                "SELECT id, status, has_gps FROM activities WHERE id = ?", (aid,)
-            ).fetchone()
-            if existing:
-                if summary:
-                    cur = conn.execute(
-                        """
-                        UPDATE activities
-                        SET sport_type = ?,
-                            summary_polyline = CASE
-                                WHEN summary_polyline IS NULL OR summary_polyline = '' THEN ?
-                                ELSE summary_polyline
-                            END,
-                            has_gps = 1,
-                            status = CASE
-                                WHEN ? = 'skipped_ignored_sport' THEN 'skipped_ignored_sport'
-                                WHEN status IN ('skipped_no_gps', 'skipped_ignored_sport') THEN 'pending'
-                                ELSE status
-                            END
-                        WHERE id = ?
-                        """,
-                        (sport_type, summary, status, aid),
-                    )
-                    updated += cur.rowcount
-                    if status == "skipped_ignored_sport":
-                        ignored += cur.rowcount
-                elif _is_ignored_sport(sport_type):
-                    cur = conn.execute(
-                        "UPDATE activities SET sport_type = ?, status = 'skipped_ignored_sport' WHERE id = ?",
-                        (sport_type, aid),
-                    )
-                    ignored += cur.rowcount
-                continue
-            conn.execute(
-                """
-                INSERT INTO activities
-                (id, start_utc, start_local, timezone, sport_type, summary_polyline, has_gps, status, tile_engine)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    aid,
-                    a["start_date"],
-                    a["start_date_local"],
-                    a.get("timezone", ""),
-                    sport_type,
-                    summary,
-                    int(has_gps),
-                    status,
-                    make_engine().id,
-                ),
-            )
-            if status == "skipped_ignored_sport":
-                ignored += 1
-            stored += 1
+        for activity in activities:
+            inserted, is_ignored = _store_summary(conn, activity)
+            stored += int(inserted)
+            updated += int(not inserted)
+            ignored += int(is_ignored)
         conn.commit()
     return {
         "fetched": len(activities),
@@ -261,26 +362,79 @@ def _prior_activity_tiles(
     tiles: set[str],
     start_local: str,
     activity_id: int,
+    *,
+    start_utc: str | None = None,
+    use_baseline: bool = False,
 ) -> set[str]:
     seen: set[str] = set()
     tile_list = list(tiles)
     for i in range(0, len(tile_list), 500):
         chunk = tile_list[i : i + 500]
         placeholders = ",".join("?" for _ in chunk)
-        rows = conn.execute(
-            f"""
-            SELECT DISTINCT at.tile_id
-            FROM activity_tiles at
-            JOIN activities a ON a.id = at.activity_id
-            WHERE at.tile_kind = ?
-              AND a.status = 'processed'
-              AND a.id != ?
-              AND a.start_local < ?
-              AND at.tile_id IN ({placeholders})
-            """,
-            (tile_kind, activity_id, start_local, *chunk),
-        ).fetchall()
+        if use_baseline:
+            if start_utc is None:
+                raise ValueError("start_utc is required for baseline-aware novelty")
+            baseline = get_baseline(conn)
+            if baseline is None:
+                raise ValueError("Baseline-aware novelty requested without an installed baseline")
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT at.tile_id
+                FROM activity_tiles at
+                JOIN activities a ON a.id = at.activity_id
+                WHERE at.tile_kind = ?
+                  AND a.status = 'processed'
+                  AND a.id != ?
+                  AND (a.baseline_covered = 1 OR julianday(a.start_utc) > julianday(?))
+                  AND (
+                      julianday(a.start_utc) < julianday(?)
+                      OR (julianday(a.start_utc) = julianday(?) AND a.id < ?)
+                  )
+                  AND at.tile_id IN ({placeholders})
+                """,
+                (
+                    tile_kind,
+                    activity_id,
+                    baseline["as_of_utc"],
+                    start_utc,
+                    start_utc,
+                    activity_id,
+                    *chunk,
+                ),
+            ).fetchall()
+        else:
+            if start_utc is not None:
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT at.tile_id
+                    FROM activity_tiles at
+                    JOIN activities a ON a.id = at.activity_id
+                    WHERE at.tile_kind = ?
+                      AND a.status = 'processed'
+                      AND a.id != ?
+                      AND (julianday(a.start_utc) < julianday(?)
+                           OR (julianday(a.start_utc) = julianday(?) AND a.id < ?))
+                      AND at.tile_id IN ({placeholders})
+                    """,
+                    (tile_kind, activity_id, start_utc, start_utc, activity_id, *chunk),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT at.tile_id
+                    FROM activity_tiles at
+                    JOIN activities a ON a.id = at.activity_id
+                    WHERE at.tile_kind = ?
+                      AND a.status = 'processed'
+                      AND a.id != ?
+                      AND (a.start_local < ? OR (a.start_local = ? AND a.id < ?))
+                      AND at.tile_id IN ({placeholders})
+                    """,
+                    (tile_kind, activity_id, start_local, start_local, activity_id, *chunk),
+                ).fetchall()
         seen.update(r["tile_id"] for r in rows)
+    if use_baseline:
+        seen.update(baseline_tiles_on_route(conn, tile_kind, tiles))
     return seen
 
 
@@ -289,40 +443,79 @@ def compute_historical_novelty(
     start_local: str,
     squadrats: set[str],
     squadratinhos: set[str],
+    *,
+    start_utc: str | None = None,
 ) -> dict[str, Any]:
     """Compare activity tiles with processed local history before this activity."""
     with get_db() as conn:
-        processed_before = conn.execute(
-            "SELECT COUNT(*) FROM activities WHERE status = 'processed' AND start_local < ?",
-            (start_local,),
-        ).fetchone()[0]
-        total_squadrats_before = conn.execute(
-            """
-            SELECT COUNT(DISTINCT at.tile_id)
-            FROM activity_tiles at
-            JOIN activities a ON a.id = at.activity_id
-            WHERE at.tile_kind = 'squadrat'
-              AND a.status = 'processed'
-              AND a.start_local < ?
-            """,
-            (start_local,),
-        ).fetchone()[0]
-        total_squadratinhos_before = conn.execute(
-            """
-            SELECT COUNT(DISTINCT at.tile_id)
-            FROM activity_tiles at
-            JOIN activities a ON a.id = at.activity_id
-            WHERE at.tile_kind = 'squadratinho'
-              AND a.status = 'processed'
-              AND a.start_local < ?
-            """,
-            (start_local,),
-        ).fetchone()[0]
+        activity = conn.execute("SELECT * FROM activities WHERE id = ?", (activity_id,)).fetchone()
+        if activity is None and start_utc is not None:
+            activity = conn.execute(
+                "SELECT ? AS id, ? AS start_utc, ? AS start_local, ? AS baseline_covered",
+                (activity_id, start_utc, start_local, int(activity_is_covered(conn, start_utc))),
+            ).fetchone()
+        use_baseline = bool(activity and activity_uses_baseline(conn, activity))
+        start_utc = activity["start_utc"] if activity else start_utc
+        if start_utc is not None:
+            processed_before = conn.execute(
+                """SELECT COUNT(*) FROM activities WHERE status = 'processed'
+                   AND (julianday(start_utc) < julianday(?)
+                        OR (julianday(start_utc) = julianday(?) AND id < ?))""",
+                (start_utc, start_utc, activity_id),
+            ).fetchone()[0]
+        else:
+            processed_before = conn.execute(
+                """SELECT COUNT(*) FROM activities WHERE status = 'processed'
+                   AND (start_local < ? OR (start_local = ? AND id < ?))""",
+                (start_local, start_local, activity_id),
+            ).fetchone()[0]
+        if activity is not None:
+            total_squadrats_before = effective_tile_count_through(
+                conn, "squadrat", activity, include_activity=False
+            )
+            total_squadratinhos_before = effective_tile_count_through(
+                conn, "squadratinho", activity, include_activity=False
+            )
+        else:
+            total_squadrats_before = conn.execute(
+                """
+                SELECT COUNT(DISTINCT at.tile_id)
+                FROM activity_tiles at
+                JOIN activities a ON a.id = at.activity_id
+                WHERE at.tile_kind = 'squadrat'
+                  AND a.status = 'processed'
+                  AND (a.start_local < ? OR (a.start_local = ? AND a.id < ?))
+                """,
+                (start_local, start_local, activity_id),
+            ).fetchone()[0]
+            total_squadratinhos_before = conn.execute(
+                """
+                SELECT COUNT(DISTINCT at.tile_id)
+                FROM activity_tiles at
+                JOIN activities a ON a.id = at.activity_id
+                WHERE at.tile_kind = 'squadratinho'
+                  AND a.status = 'processed'
+                  AND (a.start_local < ? OR (a.start_local = ? AND a.id < ?))
+                """,
+                (start_local, start_local, activity_id),
+            ).fetchone()[0]
         seen_squadrats = _prior_activity_tiles(
-            conn, "squadrat", squadrats, start_local, activity_id
+            conn,
+            "squadrat",
+            squadrats,
+            start_local,
+            activity_id,
+            start_utc=start_utc,
+            use_baseline=use_baseline,
         )
         seen_squadratinhos = _prior_activity_tiles(
-            conn, "squadratinho", squadratinhos, start_local, activity_id
+            conn,
+            "squadratinho",
+            squadratinhos,
+            start_local,
+            activity_id,
+            start_utc=start_utc,
+            use_baseline=use_baseline,
         )
 
     new_squadrats = squadrats - seen_squadrats
@@ -356,52 +549,27 @@ def _store_activity_tiles(
         _set_activity_status(activity_id, "skipped_no_gps")
         return {"status": "skipped_no_gps", "activity_id": activity_id, "source": source}
 
-    squadrats, squadratinhos = engine.tiles_for_segments(segments)
+    try:
+        squadrats, squadratinhos = engine.tiles_for_segments(segments)
+    except (ValueError, TypeError, IndexError) as exc:
+        error_msg = f"Invalid route coordinates: {exc}"
+        _set_activity_status(
+            activity_id, "processed" if row["status"] == "processed" else "failed", error_msg
+        )
+        return {"status": "failed", "activity_id": activity_id, "error": error_msg}
 
     with get_db() as conn:
-        start_local = row["start_local"]
-        existing_squadrats = _prior_activity_tiles(
-            conn, "squadrat", squadrats, start_local, activity_id
-        )
-        existing_squadratinhos = _prior_activity_tiles(
-            conn, "squadratinho", squadratinhos, start_local, activity_id
-        )
-
-        new_squadrats = squadrats - existing_squadrats
-        new_squadratinhos = squadratinhos - existing_squadratinhos
-
+        affected = {"squadrat": set(squadrats), "squadratinho": set(squadratinhos)}
+        for previous in conn.execute(
+            "SELECT tile_kind, tile_id FROM activity_tiles WHERE activity_id = ?", (activity_id,)
+        ):
+            affected[previous["tile_kind"]].add(previous["tile_id"])
         conn.execute("DELETE FROM activity_tiles WHERE activity_id = ?", (activity_id,))
-        conn.executemany(
-            "INSERT INTO activity_tiles (activity_id, tile_kind, tile_id, is_new) VALUES (?, 'squadrat', ?, ?)",
-            [(activity_id, t, 1 if t in new_squadrats else 0) for t in squadrats],
-        )
-        conn.executemany(
-            "INSERT INTO activity_tiles (activity_id, tile_kind, tile_id, is_new) VALUES (?, 'squadratinho', ?, ?)",
-            [(activity_id, t, 1 if t in new_squadratinhos else 0) for t in squadratinhos],
-        )
-
-        conn.executemany(
-            """
-            INSERT INTO global_tiles (tile_kind, tile_id, first_activity_id, first_seen_local)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(tile_kind, tile_id) DO UPDATE SET
-                first_activity_id = excluded.first_activity_id,
-                first_seen_local = excluded.first_seen_local
-            WHERE excluded.first_seen_local < global_tiles.first_seen_local
-            """,
-            [("squadrat", t, activity_id, start_local) for t in new_squadrats],
-        )
-        conn.executemany(
-            """
-            INSERT INTO global_tiles (tile_kind, tile_id, first_activity_id, first_seen_local)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(tile_kind, tile_id) DO UPDATE SET
-                first_activity_id = excluded.first_activity_id,
-                first_seen_local = excluded.first_seen_local
-            WHERE excluded.first_seen_local < global_tiles.first_seen_local
-            """,
-            [("squadratinho", t, activity_id, start_local) for t in new_squadratinhos],
-        )
+        for kind, tiles in (("squadrat", squadrats), ("squadratinho", squadratinhos)):
+            conn.executemany(
+                "INSERT INTO activity_tiles (activity_id, tile_kind, tile_id) VALUES (?, ?, ?)",
+                [(activity_id, kind, tile_id) for tile_id in tiles],
+            )
 
         conn.execute(
             """
@@ -409,28 +577,35 @@ def _store_activity_tiles(
             SET status = ?, squadrat_count = ?, squadratinho_count = ?,
                 new_squadrat_count = ?, new_squadratinho_count = ?,
                 processed_at = ?, tile_engine = ?, tile_source = ?, has_gps = 1,
-                last_error = NULL
+                last_error = NULL,
+                stream_refresh_pending = CASE WHEN ? = 'streams_clean' THEN 0 ELSE stream_refresh_pending END
             WHERE id = ?
             """,
             (
                 "processed",
                 len(squadrats),
                 len(squadratinhos),
-                len(new_squadrats),
-                len(new_squadratinhos),
+                0,
+                0,
                 datetime.now(tz=timezone.utc).isoformat(),
                 engine.id,
+                source,
                 source,
                 activity_id,
             ),
         )
+        rebuild_tile_history(conn, affected)
+        counts = conn.execute(
+            "SELECT new_squadrat_count, new_squadratinho_count FROM activities WHERE id = ?",
+            (activity_id,),
+        ).fetchone()
         conn.commit()
 
     return {
         "status": "processed",
         "activity_id": activity_id,
-        "new_squadrats": len(new_squadrats),
-        "new_squadratinhos": len(new_squadratinhos),
+        "new_squadrats": counts["new_squadrat_count"],
+        "new_squadratinhos": counts["new_squadratinho_count"],
         "squadrats": len(squadrats),
         "squadratinhos": len(squadratinhos),
         "source": source,
@@ -448,11 +623,24 @@ def compute_activity_tiles(activity_id: int) -> dict[str, Any]:
         streams = get_activity_streams(activity_id, keys="latlng,time")
     except Exception as e:
         error_msg = str(classify_strava_error(e))
-        _set_activity_status(activity_id, "failed", error_msg)
+        _set_activity_status(
+            activity_id, "processed" if row["status"] == "processed" else "failed", error_msg
+        )
         return {"status": "failed", "activity_id": activity_id, "error": error_msg}
 
-    segments, stream_stats = clean_stream_segments(streams)
+    try:
+        segments, stream_stats = clean_stream_segments(streams)
+    except (ValueError, TypeError, IndexError) as exc:
+        error_msg = f"Invalid GPS stream: {exc}"
+        _set_activity_status(
+            activity_id, "processed" if row["status"] == "processed" else "failed", error_msg
+        )
+        return {"status": "failed", "activity_id": activity_id, "error": error_msg}
     if not any(segments):
+        if row["status"] == "processed":
+            error_msg = "No usable GPS stream; preserved previously processed tiles"
+            _set_activity_status(activity_id, "processed", error_msg)
+            return {"status": "failed", "activity_id": activity_id, "error": error_msg}
         _set_activity_status(activity_id, "skipped_no_gps")
         return {"status": "skipped_no_gps", "activity_id": activity_id, "source": "streams_clean"}
 
@@ -513,19 +701,12 @@ def compute_period_totals(start_local: str) -> tuple[int, int]:
 
 def compute_total_unique_squadrats_through(activity_id: int, start_local: str) -> int:
     """Return total unique Squadrats seen before this activity plus this activity."""
+    del start_local  # Retained in the public helper signature for backwards compatibility.
     with get_db() as conn:
-        total = conn.execute(
-            """
-            SELECT COUNT(DISTINCT at.tile_id)
-            FROM activity_tiles at
-            JOIN activities a ON a.id = at.activity_id
-            WHERE at.tile_kind = 'squadrat'
-              AND a.status = 'processed'
-              AND (a.start_local < ? OR a.id = ?)
-            """,
-            (start_local, activity_id),
-        ).fetchone()[0]
-    return int(total)
+        activity = conn.execute("SELECT * FROM activities WHERE id = ?", (activity_id,)).fetchone()
+        if activity is None:
+            return 0
+        return effective_tile_count_through(conn, "squadrat", activity, include_activity=True)
 
 
 def _fetch_recent_activities(after: int, per_page: int = 200) -> list[dict[str, Any]]:
@@ -542,84 +723,37 @@ def _fetch_recent_activities(after: int, per_page: int = 200) -> list[dict[str, 
 
 def sync_once() -> dict[str, Any]:
     """Incremental sync: fetch recent, compute tiles, annotate new activities."""
-    after = int(
-        (datetime.now(tz=timezone.utc) - timedelta(days=settings.sync_lookback_days)).timestamp()
-    )
+    sync_started_at = datetime.now(tz=timezone.utc)
+    after = _sync_after_timestamp(sync_started_at)
     activities = _fetch_recent_activities(after)
 
     new_count = 0
     skipped = 0
     with get_db() as conn:
-        for a in activities:
-            aid = a["id"]
-            summary = _summary_polyline(a)
-            sport_type = a.get("sport_type", "")
-            has_gps = bool(summary)
-            status = _pending_status(sport_type)
-            existing = conn.execute(
-                "SELECT id, status, has_gps FROM activities WHERE id = ?", (aid,)
-            ).fetchone()
-            if existing:
-                if summary:
-                    conn.execute(
-                        """
-                        UPDATE activities
-                        SET sport_type = ?,
-                            summary_polyline = CASE
-                                WHEN summary_polyline IS NULL OR summary_polyline = '' THEN ?
-                                ELSE summary_polyline
-                            END,
-                            has_gps = 1,
-                            status = CASE
-                                WHEN ? = 'skipped_ignored_sport' THEN 'skipped_ignored_sport'
-                                WHEN status IN ('skipped_no_gps', 'skipped_ignored_sport') THEN 'pending'
-                                ELSE status
-                            END
-                        WHERE id = ?
-                        """,
-                        (sport_type, summary, status, aid),
-                    )
-                elif _is_ignored_sport(sport_type):
-                    conn.execute(
-                        "UPDATE activities SET sport_type = ?, status = 'skipped_ignored_sport' WHERE id = ?",
-                        (sport_type, aid),
-                    )
-                continue
-            if not existing:
-                conn.execute(
-                    """
-                    INSERT INTO activities
-                    (id, start_utc, start_local, timezone, sport_type, summary_polyline, has_gps, status, tile_engine)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        aid,
-                        a["start_date"],
-                        a["start_date_local"],
-                        a.get("timezone", ""),
-                        sport_type,
-                        summary,
-                        int(has_gps),
-                        status,
-                        make_engine().id,
-                    ),
-                )
-                new_count += 1
+        for activity in activities:
+            inserted, _ignored = _store_summary(conn, activity)
+            new_count += int(inserted)
         conn.commit()
 
     # Process all pending (tile computation)
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id FROM activities WHERE status = 'pending' ORDER BY start_local"
+            """SELECT id FROM activities
+               WHERE status IN ('pending', 'failed')
+                  OR (status = 'processed' AND stream_refresh_pending = 1)
+               ORDER BY julianday(start_utc), id"""
         ).fetchall()
 
     processed = 0
+    failed = 0
     for row in track(rows, description="Processing tiles", disable=not rows):
         result = compute_activity_tiles(row["id"])
         if result["status"] == "processed":
             processed += 1
         elif result["status"] == "skipped_no_gps":
             skipped += 1
+        else:
+            failed += 1
 
     # Annotate only recent unannotated activities (not old ones)
     annotation_cutoff = (
@@ -630,8 +764,9 @@ def sync_once() -> dict[str, Any]:
             """
             SELECT id FROM activities
             WHERE status = 'processed'
-              AND (annotation_status IS NULL OR annotation_status = 'none')
-              AND (start_utc >= ? OR ?)
+              AND stream_refresh_pending = 0
+              AND (annotation_status IS NULL OR annotation_status IN ('none', 'failed'))
+              AND (julianday(start_utc) >= julianday(?) OR ?)
             ORDER BY start_utc, id
             """,
             (annotation_cutoff, int(settings.rewrite_existing_annotations)),
@@ -643,9 +778,14 @@ def sync_once() -> dict[str, Any]:
         if result["status"] == "annotated":
             annotated += 1
             print(f"Annotated {row['id']}: {result['line']}")
+        elif result["status"] == "annotation_failed":
+            failed += 1
+
+    set_setting(_LAST_SUCCESSFUL_SYNC_KEY, sync_started_at.isoformat())
 
     return {
         "new_activities": new_count,
+        "failed": failed,
         "processed": processed,
         "annotated": annotated,
         "skipped": skipped,
@@ -660,7 +800,9 @@ def retry_failed() -> dict[str, Any]:
 
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id FROM activities WHERE status = 'failed' ORDER BY start_local"
+            """SELECT id FROM activities WHERE status = 'failed'
+               OR (status = 'processed' AND stream_refresh_pending = 1)
+               ORDER BY julianday(start_utc), id"""
         ).fetchall()
 
     total_failed = len(rows)
@@ -677,7 +819,7 @@ def retry_failed() -> dict[str, Any]:
     # Also retry failed annotations
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT id FROM activities WHERE annotation_status = 'failed' ORDER BY start_local"
+            "SELECT id FROM activities WHERE annotation_status = 'failed' ORDER BY julianday(start_utc), id"
         ).fetchall()
 
     total_anno_failed = len(rows)

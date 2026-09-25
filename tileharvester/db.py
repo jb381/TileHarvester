@@ -88,6 +88,36 @@ MIGRATIONS = [
     SET annotation_status = 'done'
     WHERE annotation_status IN ('updated', 'skipped');
     """,
+    """
+    CREATE TABLE IF NOT EXISTS baseline_imports (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        source_name TEXT NOT NULL,
+        sha256 TEXT NOT NULL UNIQUE,
+        imported_at TEXT NOT NULL,
+        as_of_utc TEXT NOT NULL,
+        squadrat_count INTEGER NOT NULL,
+        squadratinho_count INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS baseline_tiles (
+        import_id INTEGER NOT NULL DEFAULT 1,
+        tile_kind TEXT NOT NULL CHECK (tile_kind IN ('squadrat', 'squadratinho')),
+        tile_id TEXT NOT NULL,
+        PRIMARY KEY (import_id, tile_kind, tile_id),
+        FOREIGN KEY (import_id) REFERENCES baseline_imports(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_baseline_tiles_kind
+        ON baseline_tiles(tile_kind, tile_id);
+    """,
+    """
+    ALTER TABLE activities
+    ADD COLUMN baseline_covered INTEGER NOT NULL DEFAULT 0;
+    """,
+    """
+    ALTER TABLE activities
+    ADD COLUMN stream_refresh_pending INTEGER NOT NULL DEFAULT 0;
+    """,
 ]
 
 
@@ -142,7 +172,15 @@ def migrate() -> None:
 
 def reset() -> None:
     with get_db() as conn:
-        for table in ["activity_tiles", "global_tiles", "activities", "settings", "schema_version"]:
+        for table in [
+            "baseline_tiles",
+            "baseline_imports",
+            "activity_tiles",
+            "global_tiles",
+            "activities",
+            "settings",
+            "schema_version",
+        ]:
             conn.execute(f"DROP TABLE IF EXISTS {table}")
         conn.commit()
     migrate()

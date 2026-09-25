@@ -50,7 +50,7 @@ def test_recompute_preserves_stream_tiles_and_rebuilds_summaries(isolated_db) ->
 
     result = recompute_mod.recompute_all()
 
-    assert result == {"rebuilt": 1, "preserved": 1, "skipped": 0}
+    assert result == {"rebuilt": 1, "preserved": 1, "skipped": 0, "failed": 0}
     with get_db() as conn:
         stream_tile = conn.execute(
             "SELECT COUNT(*) FROM activity_tiles WHERE activity_id = 1"
@@ -58,6 +58,24 @@ def test_recompute_preserves_stream_tiles_and_rebuilds_summaries(isolated_db) ->
         global_tiles = conn.execute("SELECT COUNT(*) FROM global_tiles").fetchone()[0]
     assert stream_tile == 1
     assert global_tiles > 0
+
+
+def test_recompute_counts_failed_tile_rebuild(isolated_db, monkeypatch) -> None:
+    del isolated_db
+    _insert_processed_activity(
+        1,
+        source="summary_polyline",
+        summary=polyline.encode([(52.0, 5.0), (52.0001, 5.0001)]),
+    )
+    monkeypatch.setattr(
+        recompute_mod,
+        "_store_activity_tiles",
+        lambda *_args, **_kwargs: {"status": "failed", "error": "invalid route"},
+    )
+
+    result = recompute_mod.recompute_all()
+
+    assert result == {"rebuilt": 0, "preserved": 0, "skipped": 0, "failed": 1}
 
 
 def test_novelty_rebuild_rolls_back_on_failure(isolated_db, monkeypatch) -> None:
@@ -69,7 +87,7 @@ def test_novelty_rebuild_rolls_back_on_failure(isolated_db, monkeypatch) -> None
         conn.commit()
     monkeypatch.setattr(
         recompute_mod,
-        "_prior_activity_tiles",
+        "rebuild_tile_history",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("broken rebuild")),
     )
 
