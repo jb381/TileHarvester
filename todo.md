@@ -41,41 +41,56 @@
 ## 🧪 Testing
 
 - [ ] **Add tests for `sync.py` core logic**
-  - Test `fetch_and_store_summaries` with mock Strava responses
-  - Test `compute_activity_tiles` with mock GPS streams
-  - Test `compute_historical_novelty` with seeded DB data
-  - Test `annotate_activity` with mocked Strava API calls
-  - Test `backfill` flow end-to-end with mocks
-  - Test `sync_once` incremental sync logic
+  - Tested `fetch_and_store_summaries` with mock Strava responses
+  - Tested `compute_activity_tiles` with mock GPS streams
+  - Tested `compute_historical_novelty` with seeded DB data
+  - Tested `annotate_activity` with mocked Strava API calls
+  - [ ] Test `backfill` flow end-to-end with mocks
+  - [ ] Test `sync_once` incremental sync logic
+  - Tested `_parse_local`, `_week_start`, `_month_start`, `_distance_meters`, `clean_stream_segments`, `_is_ignored_sport`, `_pending_status`
+  - Tested `compute_period_totals` and `compute_total_unique_squadrats_through`
 
-- [ ] **Add tests for `db.py`**
-  - Test migrations run correctly on fresh DB
-  - Test `get_setting` / `set_setting` roundtrip
-  - Test `reset()` clears all tables
-  - Test schema version tracking
+- [x] **Add tests for `db.py`**
+  - Tested migrations run correctly on fresh DB
+  - Tested `get_setting` / `set_setting` roundtrip
+  - Tested `reset()` clears all tables
+  - Tested schema version tracking and migrate idempotency
 
-- [ ] **Add tests for `strava_client.py`**
-  - Mock `httpx` requests for all API calls
-  - Test token refresh logic (expired vs valid tokens)
-  - Test `_rate_limit_sleep` behavior
-  - Test `exchange_code` saves tokens correctly
-  - Test `is_authenticated` checks
+- [x] **Add tests for `strava_client.py`**
+  - Tested `_request_with_retry` (success, retry on 5xx, no retry on 4xx, exhaustion)
+  - Tested `_parse_rate_limit_headers` (valid, single, missing, invalid)
+  - Tested token storage (`_save_tokens`, `_load_tokens`)
+  - Tested token refresh logic (expired vs valid tokens)
+  - Tested `_rate_limit_sleep` behavior
+  - Tested `exchange_code` saves tokens correctly
+  - Tested `is_authenticated` checks
+  - Tested `build_auth_url` (correct params, missing credentials)
+  - Tested `_refresh_if_needed` (not authenticated, valid, expired)
+  - Tested `get_rate_limit_status` (success, error)
+  - Tested `classify_strava_error` (all error types + pass-through)
 
 - [ ] **Add tests for `cli.py` commands**
-  - Use `typer.testing.CliRunner` to test each command
-  - Test `auth` flow with mocked browser and code exchange
-  - Test `status` output formatting
-  - Test `reset_db --force` requires flag
-  - Test command exit codes (auth required, etc.)
+  - Used `typer.testing.CliRunner` to test each command
+  - Tested `status` output formatting
+  - Tested `stats` output formatting
+  - Tested `reset_db --force` requires flag
+  - [ ] Test `auth` flow with mocked browser and code exchange
+  - Tested command exit codes for auth-required commands
+  - Tested `health` command (with and without auth)
+  - Tested `recompute` and `recompute_novelty`
+  - Tested `service` command (print, invalid action)
 
-- [ ] **Add integration tests**
-  - Full flow: store summary → process tiles → annotate → verify description updated
-  - Use temporary SQLite DB and mocked Strava API
+- [x] **Add integration tests**
+  - Full flow: store summary → process tiles → verify DB state
+  - Full flow: fetch streams → compute tiles → verify DB state
+  - Full flow: process tiles → annotate → verify description updated
+  - Tested `_store_activity_tiles` with seeded data
 
 - [ ] **Set up test coverage reporting**
-  - Add `pytest-cov` to dev dependencies
-  - Add coverage config to `pyproject.toml` (target 80%+)
-  - Add coverage badge to README
+  - Added `pytest-cov>=4.1.0` to dev dependencies
+  - Added `[tool.pytest.ini_options]`, `[tool.coverage.run]`, `[tool.coverage.report]` to `pyproject.toml`
+  - [ ] Add coverage badge to README
+  - Current coverage: 85% (233 tests passed); annotation policy regression tests added
 
 ## 🏗️ Refactoring
 

@@ -84,6 +84,32 @@ def test_cli_validate_uses_baseline_for_unstored_activity(isolated_db, tmp_path,
     assert "New Squadrats from this activity:  0" in result.output
 
 
+def test_sync_skips_zero_new_squadrats_without_retrying(isolated_db, monkeypatch):
+    from unittest.mock import Mock
+
+    _insert_activity(1, datetime.now(timezone.utc).isoformat())
+    with get_db() as conn:
+        conn.execute("UPDATE activities SET status = 'processed' WHERE id = 1")
+        conn.commit()
+    monkeypatch.setattr(sync, "_fetch_recent_activities", lambda _after: [])
+    get_activity = Mock()
+    update_description = Mock()
+    monkeypatch.setattr(annotate, "get_activity", get_activity)
+    monkeypatch.setattr(annotate, "update_activity_description", update_description)
+
+    assert sync.sync_once()["annotated"] == 0
+    with get_db() as conn:
+        row = conn.execute("SELECT annotation_status FROM activities WHERE id = 1").fetchone()
+    assert row["annotation_status"] == "skipped"
+
+    annotate_activity = Mock(side_effect=AssertionError("Skipped ride must not be retried"))
+    monkeypatch.setattr(sync, "annotate_activity", annotate_activity)
+    assert sync.sync_once()["annotated"] == 0
+    annotate_activity.assert_not_called()
+    get_activity.assert_not_called()
+    update_description.assert_not_called()
+
+
 def test_cli_auth_extracts_code_without_opening_browser(isolated_db, monkeypatch):
     monkeypatch.setattr(cli, "is_authenticated", lambda: False)
     monkeypatch.setattr(cli, "build_auth_url", lambda: "https://www.strava.com/oauth/authorize")

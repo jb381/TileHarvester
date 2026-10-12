@@ -9,8 +9,8 @@ def test_successful_annotation_uses_done_status(isolated_db, monkeypatch) -> Non
     with get_db() as conn:
         conn.execute(
             """
-            INSERT INTO activities (id, start_utc, start_local, has_gps, status)
-            VALUES (1, '2026-01-01T10:00:00Z', '2026-01-01T11:00:00', 1, 'processed')
+            INSERT INTO activities (id, start_utc, start_local, has_gps, status, new_squadrat_count)
+            VALUES (1, '2026-01-01T10:00:00Z', '2026-01-01T11:00:00', 1, 'processed', 1)
             """
         )
         conn.commit()
