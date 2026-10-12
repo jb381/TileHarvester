@@ -18,7 +18,7 @@ from tileharvester.sync import (
 
 
 def annotate_activity(activity_id: int) -> dict[str, Any]:
-    """Update Strava description with TileHarvester line."""
+    """Update Strava description only for activities with new Squadrats."""
     with get_db() as conn:
         row = conn.execute("SELECT * FROM activities WHERE id = ?", (activity_id,)).fetchone()
         if row is None:
@@ -28,6 +28,23 @@ def annotate_activity(activity_id: int) -> dict[str, Any]:
             return {"status": "not_processed", "activity_id": activity_id}
 
         new_count = row["new_squadrat_count"]
+        if new_count == 0:
+            conn.execute(
+                """
+                UPDATE activities
+                SET annotation_status = 'skipped', description_line = NULL,
+                    annotated_at = ?, last_error = NULL
+                WHERE id = ?
+                """,
+                (datetime.now(tz=timezone.utc).isoformat(), activity_id),
+            )
+            conn.commit()
+            return {
+                "status": "skipped",
+                "activity_id": activity_id,
+                "reason": "no_new_squadrats",
+            }
+
         start_local = row["start_local"]
 
     month_total, week_total = compute_period_totals(start_local)

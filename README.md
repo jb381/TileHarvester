@@ -6,11 +6,13 @@ Auto-drop [Squadrats](https://squadrats.com/rules) stats into your Strava descri
 
 ## What it does
 
-Every new activity gets a little line in the description:
+New activities that discover at least one new Squadrat get a little line in the description:
 
 ```
 🗺️ TileHarvester: 1,234 Squadrats · +13 new · +653/mo · +10/wk
 ```
+
+Activities with zero new Squadrats leave your Strava description untouched.
 
 ![TileHarvester Strava description example](assets/tileharvester-strava-example.png)
 

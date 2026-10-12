@@ -6,6 +6,8 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-added-large-files
+        # Preserve the full-resolution transparent banner variant.
+        exclude: ^assets/tileharvester-title-variant-f-playful-harvester-transparent\.png$
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.11.0
