@@ -1078,7 +1078,7 @@ pub(crate) fn sync_once_with_conn(
                 }
             }
             AnnotateStatus::AnnotationFailed => result.failed += 1,
-            AnnotateStatus::NotProcessed => {}
+            AnnotateStatus::Skipped | AnnotateStatus::NotProcessed => {}
         }
     }
     set_setting_with_conn(
@@ -1122,10 +1122,10 @@ pub(crate) fn retry_failed_with_conn(
     )?;
     for id in ids {
         result.retried += 1;
-        result.success += usize::from(
-            annotate_activity_with_conn(settings, conn, &matcher, api, id)?.status
-                == AnnotateStatus::Annotated,
-        );
+        result.success += usize::from(matches!(
+            annotate_activity_with_conn(settings, conn, &matcher, api, id)?.status,
+            AnnotateStatus::Annotated | AnnotateStatus::Skipped
+        ));
     }
     Ok(result)
 }

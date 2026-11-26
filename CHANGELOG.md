@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here, following the Keep a Changelog format.
 
+## [Unreleased]
+
+### Changed
+
+- Leave Strava descriptions untouched for activities with no new Squadrats. When `TH_INCLUDE_SQUADRATINHOS=true`, new Squadratinhos also qualify an activity for annotation.
+
 ## [0.1.0] - 2026-11-26
 
 ### Changed

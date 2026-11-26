@@ -40,7 +40,7 @@ pub(crate) fn recompute_novelty_from_stored_tiles_with_conn(
     if settings.rewrite_existing_annotations {
         tx.execute(
             "UPDATE activities SET annotation_status = 'none'
-             WHERE status = 'processed' AND annotation_status = 'done'",
+             WHERE status = 'processed' AND annotation_status IN ('done', 'skipped')",
             [],
         )?;
     }

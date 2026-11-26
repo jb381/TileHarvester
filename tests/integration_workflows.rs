@@ -266,7 +266,9 @@ fn recompute_preserves_streams_rebuilds_summary_and_requeues_allowed_sports() {
     ]);
     let api = api.with_streams(1, stream(52.0, 5.0));
     assert_eq!(backfill(&s, &api, None).unwrap().processed, 2);
-    assert_eq!(sync_once(&s, &api).unwrap().annotated, 2);
+    assert_eq!(sync_once(&s, &api).unwrap().annotated, 1);
+    assert_eq!(row(&s, 1).annotation_status.as_str(), "done");
+    assert_eq!(row(&s, 2).annotation_status.as_str(), "skipped");
     let original = tiles(&s, 1);
     let old_summary = tiles(&s, 2);
     let conn = get_db(&s).unwrap();
@@ -528,4 +530,128 @@ fn annotation_checks_activity_state_and_skips_unchanged_description() {
         [1]
     );
     assert_eq!(row(&s, 1).annotation_status.as_str(), "done");
+}
+
+#[test]
+fn annotation_uses_only_enabled_tile_counts_and_clears_stale_fields() {
+    use tileharvester::{annotate::annotate_activity, models::AnnotateStatus};
+
+    for (include_fine, coarse, fine, prior, expected) in [
+        (false, 0, 1, "none", AnnotateStatus::Skipped),
+        (false, 0, 1, "failed", AnnotateStatus::Skipped),
+        (false, 1, 0, "failed", AnnotateStatus::Annotated),
+        (true, 0, 1, "none", AnnotateStatus::Annotated),
+        (true, 0, 0, "none", AnnotateStatus::Skipped),
+    ] {
+        let (_dir, mut s) = isolated_db();
+        assert!(!s.include_squadratinhos_in_description);
+        s.include_squadratinhos_in_description = include_fine;
+        let initial = "Original Strava description";
+        let api = MockStravaApi::new()
+            .with_streams(1, stream(52.0, 5.0))
+            .with_description(1, initial);
+        put(&s, &summary(1, "Ride", Some(&route(52.0, 5.0))));
+        compute_activity_tiles(&s, &api, 1).unwrap();
+        get_db(&s)
+            .unwrap()
+            .execute(
+                "UPDATE activities SET new_squadrat_count = ?1, new_squadratinho_count = ?2,
+                 annotation_status = ?3, description_line = 'stale', last_error = 'old failure'
+                 WHERE id = 1",
+                rusqlite::params![coarse, fine, prior],
+            )
+            .unwrap();
+
+        let result = annotate_activity(&s, &api, 1).unwrap();
+        assert_eq!(result.status, expected);
+        assert_eq!(result.activity_id, 1);
+        assert!(result.error.is_none());
+        let stored = row(&s, 1);
+        assert!(stored.last_error.is_none());
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(stored.annotated_at.as_deref().unwrap()).is_ok()
+        );
+        if expected == AnnotateStatus::Skipped {
+            assert!(result.line.is_none());
+            assert!(stored.description_line.is_none());
+            assert_eq!(stored.annotation_status.as_str(), "skipped");
+            assert!(api.activity_details_requests().is_empty());
+            assert!(api.annotation_writes().is_empty());
+            assert_eq!(api.current_descriptions()[&1], initial);
+        } else {
+            let line = result.line.unwrap();
+            assert!(line.contains(&format!("· +{coarse} new ·")));
+            if include_fine {
+                assert!(line.ends_with("Squadratinhos (+1 new)"));
+            }
+            assert_eq!(stored.description_line.as_deref(), Some(line.as_str()));
+            assert_eq!(stored.annotation_status.as_str(), "done");
+            assert_eq!(api.activity_details_requests(), [1]);
+            assert_eq!(api.annotation_writes().len(), 1);
+            assert!(api.current_descriptions()[&1].ends_with(&line));
+        }
+    }
+}
+
+#[test]
+fn sync_leaves_duplicate_route_skipped_on_later_runs_and_reports_it() {
+    let (_dir, s) = isolated_db();
+    let first = summary(1, "Ride", None);
+    let duplicate = summary(2, "Ride", None);
+    let api = MockStravaApi::new()
+        .with_activities(vec![first])
+        .with_streams(1, stream(52.0, 5.0));
+    assert_eq!(sync_once(&s, &api).unwrap().annotated, 1);
+    put(&s, &duplicate);
+    let api = MockStravaApi::new().with_streams(2, stream(52.0, 5.0));
+    let result = sync_once(&s, &api).unwrap();
+    assert_eq!(
+        (result.processed, result.annotated, result.failed),
+        (1, 0, 0)
+    );
+    let skipped = row(&s, 2);
+    assert_eq!(skipped.annotation_status.as_str(), "skipped");
+    let result = sync_once(&s, &api).unwrap();
+    assert_eq!(
+        (result.processed, result.annotated, result.failed),
+        (0, 0, 0)
+    );
+    assert_eq!(row(&s, 2).annotated_at, skipped.annotated_at);
+    assert!(api.activity_details_requests().is_empty());
+    assert!(api.annotation_writes().is_empty());
+    let (exit, output) = invoke(&s, &api, &["status"]);
+    assert_eq!(exit, 0);
+    assert!(output
+        .lines()
+        .any(|line| line == format!("{:<27}1", "Annotation skipped:")));
+}
+
+#[test]
+fn retry_resolves_failed_annotation_without_new_tiles() {
+    let (_dir, s) = isolated_db();
+    let polyline = route(52.0, 5.0);
+    let api = MockStravaApi::new().with_activities(vec![
+        summary(2, "Ride", Some(&polyline)),
+        summary(1, "Ride", Some(&polyline)),
+    ]);
+    assert_eq!(backfill(&s, &api, None).unwrap().processed, 2);
+    assert_eq!(row(&s, 2).new_squadrat_count, 0);
+    get_db(&s)
+        .unwrap()
+        .execute(
+            "UPDATE activities SET annotation_status = 'failed', last_error = 'old failure' WHERE id = 2",
+            [],
+        )
+        .unwrap();
+
+    let api = MockStravaApi::new();
+    let result = retry_failed(&s, &api).unwrap();
+    assert_eq!((result.retried, result.success), (1, 1));
+    let stored = row(&s, 2);
+    assert_eq!(stored.annotation_status.as_str(), "skipped");
+    assert!(stored.last_error.is_none());
+    assert!(api.activity_requests().is_empty());
+    assert!(api.stream_calls().is_empty());
+    assert!(api.activity_details_requests().is_empty());
+    assert!(api.annotation_writes().is_empty());
 }
