@@ -786,7 +786,14 @@ pub(crate) fn store_activity_tiles_with_conn(
          tile_source = ?5, has_gps = 1, last_error = NULL,
          stream_refresh_pending = CASE WHEN ?5 = 'streams_clean' THEN 0 ELSE stream_refresh_pending END
          WHERE id = ?6",
-        params![squadrats.len(), squadratinhos.len(), Utc::now().to_rfc3339(), engine.id(), source, row.id],
+        params![
+            squadrats.len() as i64,
+            squadratinhos.len() as i64,
+            Utc::now().to_rfc3339(),
+            engine.id(),
+            source,
+            row.id
+        ],
     )?;
     rebuild_tile_history(&tx, Some(&affected))?;
     let (new_squadrats, new_squadratinhos) = tx.query_row(

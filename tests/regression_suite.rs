@@ -391,7 +391,7 @@ fn migration_restores_refresh_column_without_disturbing_history() {
     .unwrap();
     conn.execute(
         "DELETE FROM schema_version WHERE version=?",
-        [MIGRATIONS.len()],
+        [MIGRATIONS.len() as i64],
     )
     .unwrap();
     for _ in 0..2 {

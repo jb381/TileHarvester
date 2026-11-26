@@ -552,8 +552,8 @@ pub fn import_baseline(
             tiles.sha256,
             imported_at,
             as_of_utc,
-            tiles.squadrats.len(),
-            tiles.squadratinhos.len()
+            tiles.squadrats.len() as i64,
+            tiles.squadratinhos.len() as i64
         ],
     )?;
     {
