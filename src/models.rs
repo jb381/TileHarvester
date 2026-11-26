@@ -59,8 +59,9 @@ domain_enum!(ActivityStatus {
 domain_enum!(AnnotationStatus {
     None => "none",
     Done => "done",
+    Skipped => "skipped",
     Failed => "failed",
-} aliases { "updated" => Done, "skipped" => Done });
+} aliases { "updated" => Done });
 domain_enum!(TileKind { Squadrat => "squadrat", Squadratinho => "squadratinho" });
 domain_enum!(TileComputeStatus {
     Processed => "processed",
@@ -70,6 +71,7 @@ domain_enum!(TileComputeStatus {
 domain_enum!(AnnotateStatus {
     NotProcessed => "not_processed",
     Annotated => "annotated",
+    Skipped => "skipped",
     AnnotationFailed => "annotation_failed",
 });
 
@@ -144,12 +146,22 @@ mod tests {
             assert_eq!(stored, status.to_string());
             assert_eq!(stored.parse::<ActivityStatus>().unwrap(), status);
         }
-        for legacy in ["updated", "skipped"] {
-            assert_eq!(
-                legacy.parse::<AnnotationStatus>().unwrap(),
-                AnnotationStatus::Done
-            );
-        }
+        assert_eq!(
+            "updated".parse::<AnnotationStatus>().unwrap(),
+            AnnotationStatus::Done
+        );
+        let stored: String =
+            conn.query_row("SELECT ?", [AnnotationStatus::Skipped], |row| row.get(0))?;
+        assert_eq!(stored, "skipped");
+        assert_eq!(
+            stored.parse::<AnnotationStatus>().unwrap(),
+            AnnotationStatus::Skipped
+        );
+        assert_eq!(AnnotateStatus::Skipped.to_string(), "skipped");
+        assert_eq!(
+            "skipped".parse::<AnnotateStatus>().unwrap(),
+            AnnotateStatus::Skipped
+        );
         assert_eq!(
             "squadratinho".parse::<TileKind>().unwrap(),
             TileKind::Squadratinho

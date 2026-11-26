@@ -91,7 +91,7 @@ pub const MIGRATIONS: &[&str] = &[
 
     UPDATE activities
     SET annotation_status = 'done'
-    WHERE annotation_status IN ('updated', 'skipped');
+    WHERE annotation_status = 'updated';
     "#,
     r#"
     CREATE TABLE IF NOT EXISTS baseline_imports (
@@ -487,7 +487,7 @@ mod tests {
         conn.execute_batch(
             "INSERT INTO activities (id, start_utc, start_local, status, annotation_status)
              VALUES (1, 'utc', 'local', 'skipped_no_gps', 'updated'),
-                    (2, 'utc', 'local', 'processed', 'done');
+                    (2, 'utc', 'local', 'processed', 'skipped');
              ALTER TABLE activities ADD COLUMN stream_refresh_pending INTEGER NOT NULL DEFAULT 0;",
         )?;
         migrate(&settings)?;
@@ -505,6 +505,10 @@ mod tests {
         assert_eq!(
             get_activity_row(&conn, 2)?.unwrap().status.as_str(),
             "processed"
+        );
+        assert_eq!(
+            get_activity_row(&conn, 2)?.unwrap().annotation_status,
+            AnnotationStatus::Skipped
         );
         assert!(get_activity_row(&conn, 3)?.is_none());
 

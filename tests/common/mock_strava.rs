@@ -28,6 +28,7 @@ pub struct ActivityRequest {
 struct Calls {
     activity_requests: Vec<ActivityRequest>,
     stream_calls: Vec<(i64, String)>,
+    activity_details_requests: Vec<i64>,
     annotation_writes: Vec<(i64, String)>,
     descriptions: HashMap<i64, String>,
 }
@@ -160,6 +161,10 @@ impl MockStravaApi {
         self.calls.lock().unwrap().stream_calls.clone()
     }
 
+    pub fn activity_details_requests(&self) -> Vec<i64> {
+        self.calls.lock().unwrap().activity_details_requests.clone()
+    }
+
     /// Includes attempted writes that fail.
     pub fn annotation_writes(&self) -> Vec<(i64, String)> {
         self.calls.lock().unwrap().annotation_writes.clone()
@@ -275,6 +280,11 @@ impl StravaApi for MockStravaApi {
     }
 
     fn get_activity(&self, id: i64) -> Result<Value> {
+        self.calls
+            .lock()
+            .unwrap()
+            .activity_details_requests
+            .push(id);
         if self.fail_annotate {
             return Err(failure("mock activity detail fetch failed"));
         }
