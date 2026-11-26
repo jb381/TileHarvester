@@ -36,7 +36,7 @@ pub enum StravaError {
 /// Top-level error type for TileHarvester.
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("Not authenticated. Run 'tileharvester auth' first.")]
+    #[error("Not authenticated. Run 'tileharvester setup' (or 'tileharvester auth') first.")]
     NotAuthenticated,
 
     #[error(transparent)]

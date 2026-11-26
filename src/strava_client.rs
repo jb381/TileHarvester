@@ -27,6 +27,43 @@ pub struct RateLimitInfo {
     pub fifteen_min_used: Option<i64>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RateLimitSnapshot {
+    pub overall: RateLimitInfo,
+    pub read: RateLimitInfo,
+}
+
+impl RateLimitSnapshot {
+    pub fn is_empty(&self) -> bool {
+        self.overall == RateLimitInfo::default() && self.read == RateLimitInfo::default()
+    }
+
+    /// Return `true` when every observed Strava quota window still has strictly more
+    /// than `reserve_pct`% and `min_buffer` requests remaining.
+    pub fn has_budget(&self, reserve_pct: u8, min_buffer: i64) -> bool {
+        let pct = i128::from(reserve_pct.min(99));
+        let min_buffer = min_buffer.max(0);
+        for info in [&self.overall, &self.read] {
+            for (limit, used) in [
+                (info.fifteen_min_limit, info.fifteen_min_used),
+                (info.daily_limit, info.daily_used),
+            ] {
+                if let (Some(limit), Some(used)) = (limit, used) {
+                    if limit > 0 {
+                        let remaining = limit - used;
+                        let pct_reserve = ((i128::from(limit) * pct + 99) / 100) as i64;
+                        let required = pct_reserve.max(min_buffer);
+                        if remaining <= required {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RateLimitStatus {
     pub ok: bool,
@@ -51,6 +88,9 @@ pub trait StravaApi {
     fn get_activity_streams(&self, activity_id: i64, keys: &str) -> Result<Value>;
     fn update_activity_description(&self, activity_id: i64, description: &str) -> Result<Value>;
     fn get_rate_limit_status(&self) -> RateLimitStatus;
+    fn last_rate_limit(&self) -> Option<RateLimitSnapshot> {
+        None
+    }
 }
 
 pub fn parse_rate_limit_headers(
@@ -158,6 +198,7 @@ pub struct HttpStravaClient {
     clock: Box<dyn Fn() -> f64 + Send + Sync>,
     sleeper: Box<dyn Fn(Duration) + Send + Sync>,
     token_lock: Mutex<()>,
+    last_rate_limit: Mutex<Option<RateLimitSnapshot>>,
 }
 
 struct Response {
@@ -195,6 +236,7 @@ impl HttpStravaClient {
             }),
             sleeper: Box::new(std::thread::sleep),
             token_lock: Mutex::new(()),
+            last_rate_limit: Mutex::new(None),
         })
     }
 
@@ -314,7 +356,20 @@ impl HttpStravaClient {
         })
     }
 
+    fn record_rate_limits(&self, headers: &HeaderMap) {
+        let snapshot = RateLimitSnapshot {
+            overall: rate_limits(headers, "x-ratelimit-limit", "x-ratelimit-usage"),
+            read: rate_limits(headers, "x-readratelimit-limit", "x-readratelimit-usage"),
+        };
+        if !snapshot.is_empty() {
+            if let Ok(mut guard) = self.last_rate_limit.lock() {
+                *guard = Some(snapshot);
+            }
+        }
+    }
+
     fn api_json<T: DeserializeOwned>(&self, response: Response) -> Result<T> {
+        self.record_rate_limits(&response.headers);
         let delay = compute_rate_limit_delay(
             &response.headers,
             self.settings.rate_limit_buffer,
@@ -405,16 +460,19 @@ impl StravaApi for HttpStravaClient {
 
     fn get_rate_limit_status(&self) -> RateLimitStatus {
         match self.api_request(Method::GET, "/athlete", 15, |request| request) {
-            Ok(response) => RateLimitStatus {
-                ok: true,
-                status_code: Some(response.status),
-                rate_limit: rate_limits(
-                    &response.headers,
-                    "x-ratelimit-limit",
-                    "x-ratelimit-usage",
-                ),
-                error: None,
-            },
+            Ok(response) => {
+                self.record_rate_limits(&response.headers);
+                RateLimitStatus {
+                    ok: true,
+                    status_code: Some(response.status),
+                    rate_limit: rate_limits(
+                        &response.headers,
+                        "x-ratelimit-limit",
+                        "x-ratelimit-usage",
+                    ),
+                    error: None,
+                }
+            }
             Err(err) => RateLimitStatus {
                 ok: false,
                 status_code: None,
@@ -422,6 +480,13 @@ impl StravaApi for HttpStravaClient {
                 error: Some(classify_strava_error(&err).to_string()),
             },
         }
+    }
+
+    fn last_rate_limit(&self) -> Option<RateLimitSnapshot> {
+        self.last_rate_limit
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 }
 
@@ -713,5 +778,30 @@ mod tests {
         assert!(requests[0].ends_with(
             "client_id=client+%2B+id&client_secret=secret&grant_type=authorization_code&code=a%2Bb"
         ));
+    }
+
+    #[test]
+    fn tracks_last_rate_limit_snapshot_and_evaluates_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = credentials(&dir);
+        save_tokens(&settings, &json!({"access_token": "ok", "expires_at": 400})).unwrap();
+        let (base, server) = serve(vec![response(
+            200,
+            "X-RateLimit-Limit: 200,2000\r\nX-RateLimit-Usage: 40,500\r\n\
+             X-ReadRateLimit-Limit: 100,1000\r\nX-ReadRateLimit-Usage: 70,200\r\n",
+            "{\"id\":42}",
+        )]);
+        let (client, _) = mock_client(settings, &base);
+        assert_eq!(client.last_rate_limit(), None);
+        assert_eq!(client.get_athlete().unwrap(), json!({"id": 42}));
+        let snapshot = client.last_rate_limit().unwrap();
+        assert_eq!(snapshot.overall.fifteen_min_used, Some(40));
+        assert_eq!(snapshot.read.fifteen_min_used, Some(70));
+        // 30 remaining out of 100 read limit == 30% reserve => exhausted at 30%, ok at 25%.
+        assert!(!snapshot.has_budget(30, 10));
+        assert!(snapshot.has_budget(25, 10));
+        assert!(!snapshot.has_budget(10, 30));
+        assert!(RateLimitSnapshot::default().has_budget(30, 10));
+        server.join().unwrap();
     }
 }

@@ -1,6 +1,5 @@
-# First-time setup: docker compose run --rm tileharvester auth
-# Historical activities: docker compose run --rm tileharvester backfill
-# Start syncing: docker compose up -d
+# First-time login: docker compose run --rm tileharvester auth
+# Start syncing (auto-backfills & auto-refines in background): docker compose up -d
 # Follow logs: docker compose logs -f
 # Check status: docker compose run --rm tileharvester status
 # Back up data: docker compose run --rm tileharvester backup /data/backup.db

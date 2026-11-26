@@ -33,6 +33,9 @@ pub struct Settings {
     pub sync_lookback_days: i64,
     pub sync_annotation_window_days: i64,
     pub refine_default_limit: usize,
+    pub auto_refine: bool,
+    pub auto_refine_per_cycle: usize,
+    pub auto_refine_rate_limit_reserve_pct: u8,
     pub rate_limit_buffer: i64,
     pub ignored_sport_types: String,
     pub stream_max_segment_meters: f64,
@@ -62,6 +65,9 @@ impl Default for Settings {
             sync_lookback_days: 7,
             sync_annotation_window_days: 1,
             refine_default_limit: 80,
+            auto_refine: true,
+            auto_refine_per_cycle: 5,
+            auto_refine_rate_limit_reserve_pct: 30,
             rate_limit_buffer: 10,
             ignored_sport_types: "VirtualRide,VirtualRun".to_string(),
             stream_max_segment_meters: 300.0,
@@ -79,17 +85,37 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Load settings from `.env` (if present in current directory) and `TH_*` environment variables.
-    /// Process environment variables take precedence over `.env` values.
+    /// Load settings from `<data_dir>/.env`, `./.env`, and `TH_*` environment variables.
+    /// Precedence (highest to lowest): process environment > `./.env` > `<data_dir>/.env`.
     pub fn load() -> Result<Self> {
-        let mut merged: HashMap<String, String> = HashMap::new();
-        if let Ok(iter) = dotenvy::from_filename_iter(".env") {
-            for item in iter.flatten() {
-                merged.insert(item.0.to_ascii_uppercase(), item.1);
-            }
+        let env_vars: HashMap<String, String> = env::vars().collect();
+        Self::load_with_sources(Some(Path::new(".env")), &env_vars)
+    }
+
+    /// Load settings with explicit `.env` path and environment map (useful for isolated tests).
+    pub fn load_with_sources(
+        cwd_env: Option<&Path>,
+        env_vars: &HashMap<String, String>,
+    ) -> Result<Self> {
+        let mut cwd_map: HashMap<String, String> = HashMap::new();
+        if let Some(path) = cwd_env {
+            load_env_file_into(path, &mut cwd_map);
         }
-        for (k, v) in env::vars() {
-            merged.insert(k.to_ascii_uppercase(), v);
+
+        let resolved_data_dir = get_ci(env_vars, "TH_DATA_DIR")
+            .or_else(|| get_ci(&cwd_map, "TH_DATA_DIR"))
+            .map(expand_tilde)
+            .unwrap_or_else(default_data_dir);
+
+        let mut merged: HashMap<String, String> = HashMap::new();
+        let data_env = resolved_data_dir.join(".env");
+        let same_as_cwd = cwd_env.is_some_and(|p| p == data_env);
+        if !same_as_cwd {
+            load_env_file_into(&data_env, &mut merged);
+        }
+        merged.extend(cwd_map);
+        for (k, v) in env_vars {
+            merged.insert(k.to_ascii_uppercase(), v.clone());
         }
         Self::from_map(&merged)
     }
@@ -127,6 +153,21 @@ impl Settings {
         }
         if let Some(v) = get_ci(vars, "TH_REFINE_DEFAULT_LIMIT") {
             s.refine_default_limit = parse_field("TH_REFINE_DEFAULT_LIMIT", v)?;
+        }
+        if let Some(v) = get_ci(vars, "TH_AUTO_REFINE") {
+            s.auto_refine = parse_bool("TH_AUTO_REFINE", v)?;
+        }
+        if let Some(v) = get_ci(vars, "TH_AUTO_REFINE_PER_CYCLE") {
+            s.auto_refine_per_cycle = parse_field("TH_AUTO_REFINE_PER_CYCLE", v)?;
+        }
+        if let Some(v) = get_ci(vars, "TH_AUTO_REFINE_RESERVE_PCT") {
+            let pct: u8 = parse_field("TH_AUTO_REFINE_RESERVE_PCT", v)?;
+            if pct > 95 {
+                return Err(Error::Config(format!(
+                    "Invalid value for TH_AUTO_REFINE_RESERVE_PCT: {v:?} (must be 0..=95)"
+                )));
+            }
+            s.auto_refine_rate_limit_reserve_pct = pct;
         }
         if let Some(v) = get_ci(vars, "TH_RATE_LIMIT_BUFFER") {
             s.rate_limit_buffer = parse_field("TH_RATE_LIMIT_BUFFER", v)?;
@@ -201,6 +242,18 @@ impl Settings {
             .collect()
     }
 
+    /// Return a deterministic, sorted comma-separated list of ignored sport types.
+    pub fn canonical_ignored_sports(&self) -> String {
+        let mut sports: Vec<String> = self.ignored_sports().into_iter().collect();
+        sports.sort_unstable();
+        sports.join(",")
+    }
+
+    /// Path to the persisted `.env` file inside the data directory.
+    pub fn env_path(&self) -> PathBuf {
+        self.data_dir.join(".env")
+    }
+
     /// Path to the SQLite database file.
     pub fn db_path(&self) -> PathBuf {
         self.data_dir.join("tileharvester.db")
@@ -215,6 +268,112 @@ impl Settings {
     pub fn ensure_dirs(&self) -> Result<()> {
         fs::create_dir_all(&self.data_dir)?;
         Ok(())
+    }
+}
+
+fn load_env_file_into(path: &Path, target: &mut HashMap<String, String>) {
+    if let Ok(iter) = dotenvy::from_path_iter(path) {
+        for item in iter.flatten() {
+            target.insert(item.0.to_ascii_uppercase(), item.1);
+        }
+    }
+}
+
+/// Atomically create or update key-value pairs in a `.env` file while preserving
+/// existing comments and unrelated settings. Files are written with `0600` permissions on Unix.
+pub fn save_env_values(path: &Path, updates: &[(&str, &str)]) -> Result<()> {
+    use std::io::Write;
+
+    for &(key, value) in updates {
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            return Err(Error::Validation(format!("Invalid .env key: {key:?}")));
+        }
+        if value.contains(['\n', '\r', '\0']) {
+            return Err(Error::Validation(format!(
+                "Value for {key} cannot contain newlines or NUL bytes"
+            )));
+        }
+    }
+
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+
+    let existing = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.into()),
+    };
+
+    let mut applied: HashSet<&str> = HashSet::new();
+    let mut lines: Vec<String> = Vec::new();
+    for line in existing.lines() {
+        let trimmed = line.trim_start();
+        let mut replaced = false;
+        if !trimmed.starts_with('#') {
+            let candidate = trimmed
+                .strip_prefix("export ")
+                .unwrap_or(trimmed)
+                .trim_start();
+            if let Some((raw_key, _)) = candidate.split_once('=') {
+                let raw_key = raw_key.trim();
+                if let Some(&(k, v)) = updates
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(raw_key))
+                {
+                    if applied.insert(k) {
+                        lines.push(format_env_line(k, v));
+                    }
+                    replaced = true;
+                }
+            }
+        }
+        if !replaced {
+            lines.push(line.to_owned());
+        }
+    }
+    for &(k, v) in updates {
+        if applied.insert(k) {
+            lines.push(format_env_line(k, v));
+        }
+    }
+    let mut rendered = lines.join("\n");
+    if !rendered.is_empty() {
+        rendered.push('\n');
+    }
+
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".env-")
+        .tempfile_in(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    temporary.as_file_mut().write_all(rendered.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|err| err.error)?;
+    Ok(())
+}
+
+fn format_env_line(key: &str, value: &str) -> String {
+    let needs_quotes = value.is_empty()
+        || value.chars().any(|ch| {
+            ch.is_whitespace() || matches!(ch, '#' | '"' | '\'' | '\\' | '$' | '`' | '=')
+        });
+    if needs_quotes {
+        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("{key}=\"{escaped}\"")
+    } else {
+        format!("{key}={value}")
     }
 }
 
@@ -272,6 +431,9 @@ mod tests {
         assert_eq!(s.sync_lookback_days, 7);
         assert_eq!(s.sync_annotation_window_days, 1);
         assert_eq!(s.refine_default_limit, 80);
+        assert!(s.auto_refine);
+        assert_eq!(s.auto_refine_per_cycle, 5);
+        assert_eq!(s.auto_refine_rate_limit_reserve_pct, 30);
         assert_eq!(s.rate_limit_buffer, 10);
         assert_eq!(s.stream_max_points, 250_000);
         assert_eq!(s.description_prefix, "TileHarvester");
@@ -280,6 +442,7 @@ mod tests {
         assert!(!s.rewrite_existing_annotations);
         assert!(s.ignored_sports().contains("VirtualRide"));
         assert!(s.ignored_sports().contains("VirtualRun"));
+        assert_eq!(s.canonical_ignored_sports(), "VirtualRide,VirtualRun");
     }
 
     #[test]
@@ -289,6 +452,9 @@ mod tests {
         map.insert("TH_STRAVA_CLIENT_ID".to_string(), "123".to_string());
         map.insert("TH_STRAVA_CLIENT_SECRET".to_string(), "sec".to_string());
         map.insert("TH_SQUADRAT_OFFSET".to_string(), "+5".to_string());
+        map.insert("TH_AUTO_REFINE".to_string(), "false".to_string());
+        map.insert("TH_AUTO_REFINE_PER_CYCLE".to_string(), "12".to_string());
+        map.insert("TH_AUTO_REFINE_RESERVE_PCT".to_string(), "45".to_string());
         map.insert(
             "TH_REWRITE_EXISTING_ANNOTATIONS".to_string(),
             "true".to_string(),
@@ -300,12 +466,19 @@ mod tests {
         let s = Settings::from_map(&map).unwrap();
         assert_eq!(s.data_dir, PathBuf::from("/tmp/th-test"));
         assert_eq!(s.squadrat_offset, 5);
+        assert!(!s.auto_refine);
+        assert_eq!(s.auto_refine_per_cycle, 12);
+        assert_eq!(s.auto_refine_rate_limit_reserve_pct, 45);
         assert!(s.rewrite_existing_annotations);
         assert_eq!(
             s.ignored_sports(),
             HashSet::from(["Swim".to_string(), "VirtualRide".to_string()])
         );
+        assert_eq!(s.canonical_ignored_sports(), "Swim,VirtualRide");
         s.validate_strava_credentials().unwrap();
+
+        map.insert("TH_AUTO_REFINE_RESERVE_PCT".to_string(), "96".to_string());
+        assert!(Settings::from_map(&map).is_err());
     }
 
     #[test]
@@ -313,5 +486,59 @@ mod tests {
         let s = Settings::default();
         let err = s.validate_strava_credentials().unwrap_err();
         assert!(err.to_string().contains("TH_STRAVA_CLIENT_ID"));
+    }
+
+    #[test]
+    fn env_persistence_and_load_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let data_env = data_dir.join(".env");
+        let cwd_env = dir.path().join("cwd.env");
+
+        save_env_values(
+            &data_env,
+            &[
+                ("TH_STRAVA_CLIENT_ID", "from-data"),
+                ("TH_STRAVA_CLIENT_SECRET", "sec#with spaces"),
+                ("TH_POLL_INTERVAL_MINUTES", "9"),
+            ],
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&data_env).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        // Updating preserves existing untouched entries.
+        save_env_values(&data_env, &[("TH_STRAVA_CLIENT_ID", "updated-data")]).unwrap();
+
+        fs::write(
+            &cwd_env,
+            format!(
+                "TH_DATA_DIR={}\nTH_POLL_INTERVAL_MINUTES=15\n",
+                data_dir.display()
+            ),
+        )
+        .unwrap();
+
+        let mut proc_env = HashMap::new();
+        proc_env.insert("TH_SQUADRAT_OFFSET".to_string(), "7".to_string());
+        let loaded = Settings::load_with_sources(Some(&cwd_env), &proc_env).unwrap();
+        assert_eq!(loaded.data_dir, data_dir);
+        assert_eq!(loaded.strava_client_id, "updated-data");
+        assert_eq!(loaded.strava_client_secret, "sec#with spaces");
+        assert_eq!(loaded.poll_interval_minutes, 15);
+        assert_eq!(loaded.squadrat_offset, 7);
+
+        // Process env overrides both .env files.
+        proc_env.insert("TH_STRAVA_CLIENT_ID".to_string(), "from-env".to_string());
+        let loaded = Settings::load_with_sources(Some(&cwd_env), &proc_env).unwrap();
+        assert_eq!(loaded.strava_client_id, "from-env");
+
+        // Newlines are rejected safely.
+        assert!(save_env_values(&data_env, &[("TH_STRAVA_CLIENT_ID", "bad\nline")]).is_err());
     }
 }

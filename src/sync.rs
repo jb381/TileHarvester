@@ -7,22 +7,27 @@ use rusqlite::{params, Connection, OptionalExtension, Params, Transaction, Trans
 use serde_json::Value;
 
 use crate::annotate::annotate_activity_with_conn;
+use crate::backfill::backfill_with_conn;
 use crate::config::Settings;
 use crate::db::{
     get_activity_row, get_db, get_setting_with_conn, set_setting_with_conn, ActivityRow,
 };
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, StravaError};
 use crate::history::{rebuild_tile_history, AffectedTiles};
 use crate::kml_baseline::{
     activity_is_covered, activity_uses_baseline, baseline_tiles_on_route,
     effective_tile_count_through, get_baseline,
 };
 use crate::models::{ActivityStatus, AnnotateStatus, TileComputeStatus, TileKind, TileSource};
+use crate::recompute::recompute_all_with_conn;
+use crate::refine::auto_refine_with_conn;
 use crate::strava_client::{classify_strava_error, StravaApi};
 use crate::tile_engine::{make_engine, TileEngine};
 
 pub const STREAM_KEYS: &str = "latlng,time,moving,distance";
 pub const LAST_SUCCESSFUL_SYNC_KEY: &str = "last_successful_sync_at";
+pub const INITIAL_BACKFILL_DONE_KEY: &str = "initial_backfill_done";
+pub const LAST_IGNORED_SPORTS_KEY: &str = "last_ignored_sport_types";
 const PAGE_SIZE: u32 = 200;
 
 fn parse_naive(value: &str) -> Result<NaiveDateTime> {
@@ -103,7 +108,12 @@ pub(crate) fn sync_after_timestamp_with_conn(
         .and_then(|value| parse_utc_datetime(value.as_str()?).ok());
     let anchor = match cursor {
         Some(cursor) => cursor,
-        None => latest_stored_activity_utc_with_conn(conn)?.unwrap_or(sync_started_at),
+        None => match latest_stored_activity_utc_with_conn(conn)? {
+            Some(latest) => latest,
+            None => get_baseline(settings, conn)?
+                .and_then(|baseline| parse_utc_datetime(&baseline.as_of_utc).ok())
+                .unwrap_or(sync_started_at),
+        },
     };
     let after = days_before(anchor.min(sync_started_at), settings.sync_lookback_days)?;
     Ok(after.timestamp() + i64::from(after.timestamp() < 0 && after.timestamp_subsec_nanos() != 0))
@@ -655,6 +665,7 @@ pub struct TileComputationResult {
     pub squadratinhos: usize,
     pub source: Option<TileSource>,
     pub error: Option<String>,
+    pub strava_error: Option<StravaError>,
     pub stream_stats: Option<StreamStats>,
 }
 
@@ -708,6 +719,7 @@ fn unsuccessful_route(
         activity_id,
         source: error.is_none().then(|| source.clone()),
         error,
+        strava_error: None,
         new_squadrats: 0,
         new_squadratinhos: 0,
         squadrats: 0,
@@ -811,6 +823,7 @@ pub(crate) fn store_activity_tiles_with_conn(
         squadratinhos: squadratinhos.len(),
         source: Some(source.clone()),
         error: None,
+        strava_error: None,
         stream_stats: None,
     })
 }
@@ -833,12 +846,15 @@ pub(crate) fn compute_activity_tiles_with_conn(
     let streams = match api.get_activity_streams(activity_id, STREAM_KEYS) {
         Ok(streams) => streams,
         Err(error) => {
-            return unsuccessful_route(
+            let classified = classify_strava_error(&error);
+            let mut failed = unsuccessful_route(
                 conn,
                 activity_id,
                 &TileSource::StreamsClean,
-                Some(classify_strava_error(&error).to_string()),
-            )
+                Some(classified.to_string()),
+            )?;
+            failed.strava_error = Some(classified);
+            return Ok(failed);
         }
     };
     let (segments, stats) = match clean_stream_segments(settings, &streams) {
@@ -1017,6 +1033,29 @@ pub struct SyncOnceResult {
     pub processed: usize,
     pub annotated: usize,
     pub skipped: usize,
+    pub backfilled: bool,
+    pub auto_recomputed: bool,
+    pub refined: usize,
+    pub unrefined_remaining: i64,
+}
+
+pub(crate) fn needs_initial_backfill(settings: &Settings, conn: &Connection) -> Result<bool> {
+    if let Some(done) =
+        get_setting_with_conn(conn, INITIAL_BACKFILL_DONE_KEY)?.and_then(|value| value.as_bool())
+    {
+        return Ok(!done);
+    }
+    if get_setting_with_conn(conn, LAST_SUCCESSFUL_SYNC_KEY)?.is_some() {
+        return Ok(false);
+    }
+    if get_baseline(settings, conn)?.is_some() {
+        return Ok(false);
+    }
+    let has_activities: bool =
+        conn.query_row("SELECT EXISTS(SELECT 1 FROM activities)", [], |row| {
+            row.get(0)
+        })?;
+    Ok(!has_activities)
 }
 
 pub fn sync_once(settings: &Settings, api: &dyn StravaApi) -> Result<SyncOnceResult> {
@@ -1036,34 +1075,66 @@ pub(crate) fn sync_once_with_conn(
 ) -> Result<SyncOnceResult> {
     let matcher = crate::descriptions::DescriptionMatcher::new(settings);
     let sync_started_at = Utc::now();
-    let after = sync_after_timestamp_with_conn(settings, conn, sync_started_at)?;
-    let mut activities = Vec::new();
-    for page in 1.. {
-        let batch = api.get_activities(page, PAGE_SIZE, Some(after), None)?;
-        if batch.is_empty() {
-            break;
+    let mut result = SyncOnceResult::default();
+
+    let canonical_ignored = settings.canonical_ignored_sports();
+    let previous_ignored = get_setting_with_conn(conn, LAST_IGNORED_SPORTS_KEY)?
+        .and_then(|value| value.as_str().map(str::to_owned));
+    match previous_ignored {
+        Some(prev) if prev != canonical_ignored => {
+            recompute_all_with_conn(settings, conn)?;
+            result.auto_recomputed = true;
         }
-        activities.extend(batch);
+        None => {
+            set_setting_with_conn(
+                conn,
+                LAST_IGNORED_SPORTS_KEY,
+                &Value::String(canonical_ignored),
+            )?;
+        }
+        Some(_) => {}
     }
-    let mut result = SyncOnceResult {
-        new_activities: store_summaries(settings, conn, &activities, &settings.ignored_sports())?
-            .stored,
-        ..Default::default()
-    };
-    let ids = activity_ids(
-        conn,
-        "SELECT id FROM activities WHERE status IN ('pending', 'failed')
-         OR (status = 'processed' AND stream_refresh_pending = 1)
-         ORDER BY julianday(start_utc), id",
-        [],
-    )?;
-    for id in ids {
-        match compute_activity_tiles_with_conn(settings, conn, api, id)?.status {
-            TileComputeStatus::Processed => result.processed += 1,
-            TileComputeStatus::SkippedNoGps => result.skipped += 1,
-            TileComputeStatus::Failed => result.failed += 1,
+
+    if needs_initial_backfill(settings, conn)? {
+        set_setting_with_conn(conn, INITIAL_BACKFILL_DONE_KEY, &Value::Bool(false))?;
+        let bf = backfill_with_conn(settings, conn, api, None)?;
+        result.backfilled = true;
+        result.new_activities = bf.stored;
+        result.processed = bf.processed;
+        result.skipped = bf.skipped;
+        result.failed = bf.failed;
+    } else {
+        let after = sync_after_timestamp_with_conn(settings, conn, sync_started_at)?;
+        let mut activities = Vec::new();
+        for page in 1.. {
+            let batch = api.get_activities(page, PAGE_SIZE, Some(after), None)?;
+            if batch.is_empty() {
+                break;
+            }
+            activities.extend(batch);
+        }
+        result.new_activities =
+            store_summaries(settings, conn, &activities, &settings.ignored_sports())?.stored;
+        let ids = activity_ids(
+            conn,
+            "SELECT id FROM activities WHERE status IN ('pending', 'failed')
+             OR (status = 'processed' AND stream_refresh_pending = 1)
+             ORDER BY julianday(start_utc), id",
+            [],
+        )?;
+        for id in ids {
+            match compute_activity_tiles_with_conn(settings, conn, api, id)?.status {
+                TileComputeStatus::Processed => result.processed += 1,
+                TileComputeStatus::SkippedNoGps => result.skipped += 1,
+                TileComputeStatus::Failed => result.failed += 1,
+            }
         }
     }
+
+    let auto_refined = auto_refine_with_conn(settings, conn, api)?;
+    result.refined = auto_refined.refined;
+    result.unrefined_remaining = auto_refined.remaining;
+
     let cutoff = days_before(Utc::now(), settings.sync_annotation_window_days)?;
     let ids = activity_ids(
         conn,
