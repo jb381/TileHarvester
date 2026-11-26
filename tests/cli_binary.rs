@@ -262,3 +262,36 @@ fn backup_is_readable_and_overwrite_requires_force() {
         .code(1)
         .stdout(contains("live database"));
 }
+
+#[test]
+fn loads_persisted_env_from_data_dir_regardless_of_cwd() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let other_cwd = tempfile::tempdir().unwrap();
+    tileharvester::config::save_env_values(
+        &data_dir.path().join(".env"),
+        &[
+            ("TH_STRAVA_CLIENT_ID", "99999"),
+            ("TH_STRAVA_CLIENT_SECRET", "super-secret"),
+            ("TH_AUTO_REFINE_PER_CYCLE", "7"),
+        ],
+    )
+    .unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tileharvester"));
+    cmd.current_dir(other_cwd.path())
+        .env_clear()
+        .env("TH_DATA_DIR", data_dir.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(contains("Auto-refine:               enabled (7/cycle"));
+
+    let mut help = Command::new(env!("CARGO_BIN_EXE_tileharvester"));
+    help.current_dir(other_cwd.path())
+        .env_clear()
+        .env("TH_DATA_DIR", data_dir.path())
+        .args(["setup", "--help"])
+        .assert()
+        .success()
+        .stdout(contains("--kml"))
+        .stdout(contains("--install-service"));
+}

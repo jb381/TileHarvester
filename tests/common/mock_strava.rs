@@ -14,7 +14,7 @@ use std::time::Duration;
 use chrono::DateTime;
 use serde_json::{json, Value};
 use tileharvester::error::{classify_http_status, Result, StravaError};
-use tileharvester::strava_client::{RateLimitInfo, RateLimitStatus, StravaApi};
+use tileharvester::strava_client::{RateLimitInfo, RateLimitSnapshot, RateLimitStatus, StravaApi};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActivityRequest {
@@ -42,8 +42,11 @@ pub struct MockStravaApi {
     athlete: Value,
     oauth_tokens: Value,
     rate_limit: RateLimitStatus,
+    last_rate_limit: Option<RateLimitSnapshot>,
     fail_fetch: bool,
+    fail_fetch_page: Option<u32>,
     fail_streams: HashSet<i64>,
+    fail_stream_statuses: HashMap<i64, u16>,
     fail_annotate: bool,
     fail_update_description: bool,
     calls: Mutex<Calls>,
@@ -67,8 +70,11 @@ impl Default for MockStravaApi {
                 rate_limit: RateLimitInfo::default(),
                 error: None,
             },
+            last_rate_limit: None,
             fail_fetch: false,
+            fail_fetch_page: None,
             fail_streams: HashSet::new(),
+            fail_stream_statuses: HashMap::new(),
             fail_annotate: false,
             fail_update_description: false,
             calls: Mutex::new(Calls::default()),
@@ -132,13 +138,28 @@ impl MockStravaApi {
         self
     }
 
+    pub fn with_last_rate_limit(mut self, snapshot: RateLimitSnapshot) -> Self {
+        self.last_rate_limit = Some(snapshot);
+        self
+    }
+
     pub fn fail_fetch(mut self) -> Self {
         self.fail_fetch = true;
         self
     }
 
+    pub fn fail_fetch_page(mut self, page: u32) -> Self {
+        self.fail_fetch_page = Some(page);
+        self
+    }
+
     pub fn fail_streams_for(mut self, id: i64) -> Self {
         self.fail_streams.insert(id);
+        self
+    }
+
+    pub fn fail_streams_with_status(mut self, id: i64, status: u16) -> Self {
+        self.fail_stream_statuses.insert(id, status);
         self
     }
 
@@ -247,7 +268,7 @@ impl StravaApi for MockStravaApi {
                 after,
                 before,
             });
-        if self.fail_fetch {
+        if self.fail_fetch || self.fail_fetch_page == Some(page) {
             return Err(failure("mock activity fetch failed"));
         }
         let limit = per_page as usize;
@@ -297,6 +318,9 @@ impl StravaApi for MockStravaApi {
             .unwrap()
             .stream_calls
             .push((id, keys.to_owned()));
+        if let Some(&status) = self.fail_stream_statuses.get(&id) {
+            return Err(classify_http_status(status, "mock stream status error").into());
+        }
         if self.fail_streams.contains(&id) {
             return Err(failure("mock stream fetch failed"));
         }
@@ -324,6 +348,10 @@ impl StravaApi for MockStravaApi {
 
     fn get_rate_limit_status(&self) -> RateLimitStatus {
         self.rate_limit.clone()
+    }
+
+    fn last_rate_limit(&self) -> Option<RateLimitSnapshot> {
+        self.last_rate_limit.clone()
     }
 }
 

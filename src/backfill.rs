@@ -1,13 +1,15 @@
 //! Historical activity ingestion using summary routes where available.
 
+use serde_json::Value;
+
 use crate::config::Settings;
-use crate::db::get_db;
+use crate::db::{get_db, set_setting_with_conn};
 use crate::error::Result;
 use crate::models::{TileComputeStatus, TileSource};
 use crate::strava_client::StravaApi;
 use crate::sync::{
     activity_ids, compute_activity_tiles_from_summary_with_conn,
-    fetch_and_store_summaries_with_conn,
+    fetch_and_store_summaries_with_conn, INITIAL_BACKFILL_DONE_KEY, LAST_IGNORED_SPORTS_KEY,
 };
 
 #[derive(Debug, Default)]
@@ -81,6 +83,14 @@ pub(crate) fn backfill_with_conn(
             TileComputeStatus::SkippedNoGps => result.skipped += 1,
             TileComputeStatus::Failed => result.failed += 1,
         }
+    }
+    set_setting_with_conn(
+        conn,
+        LAST_IGNORED_SPORTS_KEY,
+        &Value::String(settings.canonical_ignored_sports()),
+    )?;
+    if limit.is_none() {
+        set_setting_with_conn(conn, INITIAL_BACKFILL_DONE_KEY, &Value::Bool(true))?;
     }
     Ok(result)
 }

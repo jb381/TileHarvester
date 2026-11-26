@@ -41,21 +41,22 @@ Grab a prebuilt binary from [GitHub Releases](https://github.com/jb381/TileHarve
 git clone https://github.com/jb381/TileHarvester.git && cd TileHarvester
 cargo install --path . --locked
 
-# 2. grab Strava API creds → https://www.strava.com/settings/api
-export TH_STRAVA_CLIENT_ID="your-id"
-export TH_STRAVA_CLIENT_SECRET="your-secret"
-
-# 3. log in (auto-captures the localhost callback)
-tileharvester auth --listen
-
-# 4. build your local tile history
-tileharvester backfill
-
-# 5. test one sync cycle
-tileharvester sync --once
+# 2. guided one-time setup (credentials → Strava login → history → optional systemd timer)
+tileharvester setup
 ```
 
-> **Remote server / SSH tip:** Forward port 8000 (`ssh -L 8000:127.0.0.1:8000 user@server`) and run `tileharvester auth --listen --no-open-browser` — your local browser callback lands cleanly on the remote host without opening any public ports. For headless Docker/Portainer setups, run `tileharvester auth` and paste the callback URL (or pass `--code <code>`).
+`tileharvester setup` prompts for your [Strava API credentials](https://www.strava.com/settings/api), saves them privately (`0600`) to `~/.local/share/tileharvester/.env`, auto-captures the OAuth callback in your browser, seeds your tile history (from Strava or an optional Squadrats KML export), and can install a rootless systemd timer on Linux.
+
+Prefer to script it or run manually? Just authenticate and start syncing — **initial backfill and full-GPS stream refinement happen automatically**:
+
+```bash
+export TH_STRAVA_CLIENT_ID="your-id"
+export TH_STRAVA_CLIENT_SECRET="your-secret"
+tileharvester auth          # auto-captures localhost callback on desktop
+tileharvester sync          # auto-backfills on first run, then syncs & refines in the background
+```
+
+> **Remote server / SSH tip:** Forward port 8000 (`ssh -L 8000:127.0.0.1:8000 user@server`) and run `tileharvester auth --listen --no-open-browser` — your local browser callback lands cleanly on the remote host without opening any public ports. Over SSH or in headless Docker/Portainer setups, `auth` automatically falls back to pasting the callback URL (or pass `--code <code>`).
 
 Once it works, hand it off to **Docker** or **systemd** for fire-and-forget syncing.
 
@@ -75,9 +76,8 @@ cp .env.example .env
 # pull prebuilt multi-arch image (linux/amd64 + linux/arm64 — zero compilation)
 docker compose pull
 
-# one-time setup
+# one-time Strava login (backfill & GPS refinement run automatically after startup!)
 docker compose run --rm tileharvester auth
-docker compose run --rm tileharvester backfill
 
 # start continuous background sync
 docker compose up -d
@@ -85,7 +85,8 @@ docker compose logs -f
 ```
 
 - **Hardened out of the box:** Runs as non-root UID `10001`, read-only root filesystem, `no-new-privileges`, built-in `HEALTHCHECK` (`tileharvester health --no-check-rate-limit`), automatic log rotation (`10m` × 3), timestamped flushed logs, and clean `SIGTERM` shutdown.
-- **One-off commands:** `docker compose run --rm tileharvester status`, `stats`, `refine`, or `backup /data/backup.db`.
+- **Zero babysitting:** The first sync cycle auto-backfills your history, and subsequent cycles quietly refine historical rides to full-GPS accuracy in the background while reserving Strava API quota for new rides.
+- **One-off commands:** `docker compose run --rm tileharvester status`, `stats`, or `backup /data/backup.db`.
 - **Updating later:** `docker compose pull && docker compose up -d` (or `docker compose up -d --build` for local builds).
 - **Upgrading an older root-owned volume:** If your existing `tileharvester-data` volume was created by an older root container, fix ownership once (adjust the volume name if Compose prefixed it):
   ```bash
@@ -94,7 +95,7 @@ docker compose logs -f
 
 ### Systemd (Linux bare-metal / Raspberry Pi) 🐧
 
-No Docker required — install a rootless user timer with zero idle RAM between runs:
+`tileharvester setup` can install this for you automatically, or run it manually for a rootless user timer with zero idle RAM between runs:
 
 ```bash
 tileharvester service install --user
@@ -115,12 +116,11 @@ System units automatically include `NoNewPrivileges=true`, `ProtectSystem=strict
 
 | Command | What it does |
 | --- | --- |
-| `tileharvester auth [--listen]` | Strava OAuth login (with optional auto-callback listener) 🔓 |
-| `tileharvester backfill` | Fast one-time history build from summary polylines 📚 |
-| `tileharvester refine` | Upgrade backfilled history to full-GPS accuracy 🔬 |
-| `tileharvester sync --once` | Run a single sync cycle 🔄 |
-| `tileharvester sync` | Continuous sync daemon with clean `SIGTERM` handling 👀 |
-| `tileharvester status` | DB, refinement, baseline, and auth overview 📊 |
+| `tileharvester setup` | Guided one-time setup: credentials, Strava OAuth, history & optional timer ✨ |
+| `tileharvester sync` | Continuous sync daemon (auto-backfills, auto-refines & clean `SIGTERM`) 👀 |
+| `tileharvester sync --once` | Run a single sync + background refine cycle 🔄 |
+| `tileharvester auth` | Strava OAuth login (auto-listens on desktop, paste fallback on headless/SSH) 🔓 |
+| `tileharvester status` | DB, auto-refinement progress, baseline, and auth overview 📊 |
 | `tileharvester stats` | Squadrats, Yard, Übersquadrat & Squadratinhos spatial stats 🏆 |
 | `tileharvester inspect-gpx <file>` | Audit a local GPX offline: spikes, segments & new tiles 🔎 |
 | `tileharvester import-kml <file>` | Seed an exact, immutable Squadrats KML baseline 🧭 |
@@ -129,7 +129,7 @@ System units automatically include `NoNewPrivileges=true`, `ProtectSystem=strict
 | `tileharvester service [print\|install] [--user]` | Generate or install systemd timer units ⚙️ |
 | `tileharvester health [--no-check-rate-limit]` | Check DB, Strava auth, and API quota 🩺 |
 
-Run `tileharvester --help` for the full menu (`retry`, `validate`, `recompute`, `recompute-novelty`, `reset-db`).
+Power-user commands (`backfill`, `refine`, `recompute`, `recompute-novelty`, `retry`, `validate`, `reset-db`) remain available via `tileharvester --help`, though `sync` handles backfill, stream refinement, and `TH_IGNORED_SPORT_TYPES` recomputes automatically.
 
 ---
 
@@ -139,23 +139,26 @@ TileHarvester computes tiles from two Strava data sources:
 
 | Source | Accuracy | Speed | Used by |
 | --- | --- | --- | --- |
-| **Summary polyline** | Lower (simplified corners) | Very fast | `backfill` |
-| **Full GPS stream** | Exact recorded points + moving/distance | Moderate (rate-limited) | `sync`, `refine` |
+| **Summary polyline** | Lower (simplified corners) | Very fast | Automatic initial backfill |
+| **Full GPS stream** | Exact recorded points + moving/distance | Rate-limited | New rides + automatic background refinement |
 
-### Typical lifecycle
+### Automatic lifecycle
 
 ```text
-One-time setup:   auth → backfill (fast summaries) → refine (full GPS streams)
-Ongoing sync:     sync loop / timer → always fetches full GPS streams automatically
+One-time:   tileharvester setup   (or auth + docker compose up -d)
+Ongoing:    tileharvester sync    → auto-backfills empty DB on first run
+                                  → fetches full GPS streams for every new ride
+                                  → trickles full-GPS refinement on older rides (newest-first, quota-safe)
+                                  → auto-recomputes if TH_IGNORED_SPORT_TYPES changes
 ```
 
-**Every new activity is processed from full GPS streams automatically** — only historical rides imported by `backfill` need `refine`. Check progress anytime with `tileharvester status` (`Stream-refined` vs. `Needs stream refinement`).
-
-Successful syncs persist a polling cursor and apply an overlap window after downtime so activities are never silently skipped.
+- **Instant start, zero rate-limit headaches:** On first sync, TileHarvester imports your full history in seconds using summary polylines so lifetime counts work immediately. Each subsequent sync cycle quietly upgrades a small batch of historical rides (`TH_AUTO_REFINE_PER_CYCLE=5`, newest-first) to full-GPS accuracy while keeping `30%` of Strava's 15-minute and daily API quotas reserved for live rides.
+- **Check progress anytime** with `tileharvester status` (`Stream-refined` vs. `Needs stream refinement`), or force an immediate batch with `tileharvester refine`.
+- Successful syncs persist a polling cursor and apply an overlap window after downtime so activities are never silently skipped.
 
 ### Optional exact Squadrats KML baseline 🧭
 
-Already have years of rides on [squadrats.com](https://squadrats.com)? Export your KML once from the Squadrats desktop map and seed TileHarvester as an authoritative starting point:
+Already have years of rides on [squadrats.com](https://squadrats.com)? Export your KML once from the Squadrats desktop map and pass it during `tileharvester setup --kml <file>` (or run `import-kml` anytime) for an exact starting point with zero historical backfill or refinement needed:
 
 ```bash
 # Seed exact Squadrats + Squadratinhos snapshot (immutable once imported)
@@ -169,8 +172,7 @@ Pass `--as-of 2026-08-01T18:43:00+02:00` if you know the exact export time; othe
 
 ### Rebuilding totals & manual offset
 
-- **`tileharvester recompute`** — re-evaluates eligibility (e.g. after changing `TH_IGNORED_SPORT_TYPES`) while preserving already stream-refined rides.
-- **`tileharvester recompute-novelty`** — fast, zero-API-call rebuild of global totals and first-seen novelty from stored tiles.
+- **Changing `TH_IGNORED_SPORT_TYPES`** triggers an automatic local recompute on the next `sync` (preserving already stream-refined rides). You can also run `tileharvester recompute` or `tileharvester recompute-novelty` manually anytime.
 - **Manual offset** — nudge the displayed lifetime Squadrat total without touching weekly/monthly counts:
   ```bash
   tileharvester sync --once --offset +5   # or set TH_SQUADRAT_OFFSET=+5 in .env
@@ -205,13 +207,16 @@ Remaining sub-0.2% z17 differences versus raw FIT archives come from 5-decimal S
 
 ## Configuration ⚙️
 
-Supply settings via `.env` or environment variables (environment variables always win). See [`.env.example`](.env.example) for the full list.
+Supply settings via environment variables, `./.env`, or `~/.local/share/tileharvester/.env` (process environment wins over `./.env`, which wins over `<data_dir>/.env`). See [`.env.example`](.env.example) for the full list.
 
 | Variable | Purpose & default |
 | --- | --- |
-| `TH_STRAVA_CLIENT_ID`, `TH_STRAVA_CLIENT_SECRET` | Strava API credentials *(required)* |
-| `TH_DATA_DIR` | SQLite DB & token directory (`~/.local/share/tileharvester`, `/data` in Docker) |
+| `TH_STRAVA_CLIENT_ID`, `TH_STRAVA_CLIENT_SECRET` | Strava API credentials *(required; `setup` can save these for you)* |
+| `TH_DATA_DIR` | SQLite DB, tokens & persisted `.env` directory (`~/.local/share/tileharvester`, `/data` in Docker) |
 | `TH_POLL_INTERVAL_MINUTES` | Sync polling interval in minutes (`5`) |
+| `TH_AUTO_REFINE` | Automatically refine historical rides to full GPS during `sync` (`true`) |
+| `TH_AUTO_REFINE_PER_CYCLE` | Max historical rides auto-refined per sync cycle (`5`) |
+| `TH_AUTO_REFINE_RESERVE_PCT` | Minimum % of Strava 15-min & daily quota kept reserved for live rides (`30`) |
 | `TH_SQUADRAT_OFFSET` | Lifetime Squadrat display offset (`0`) |
 | `TH_INCLUDE_SQUADRATINHOS` | Append Squadratinhos to Strava descriptions (`false`) |
 | `TH_IGNORED_SPORT_TYPES` | Comma-separated excluded sports (`VirtualRide,VirtualRun`) |
@@ -231,7 +236,7 @@ Supply settings via `.env` or environment variables (environment variables alway
 
 ## Development, testing & benchmarking 🛠️
 
-Requires **Rust 1.85+**. The **141-test suite** covers unit tests, CLI binary behavior, workflow integration, regressions, the Liang–Barsky geometric oracle, multi-device Squadratinho stress cases, and real loopback HTTP OAuth/retry mocks.
+Requires **Rust 1.85+**. The **152-test suite** covers unit tests, CLI binary behavior, workflow integration, regressions, the Liang–Barsky geometric oracle, multi-device Squadratinho stress cases, and real loopback HTTP OAuth/retry mocks.
 
 ```bash
 cargo test --all-targets --locked

@@ -1,13 +1,14 @@
 //! Rebuild stored activity routes and tile novelty.
 
 use rusqlite::{params_from_iter, TransactionBehavior};
+use serde_json::Value;
 
 use crate::config::Settings;
-use crate::db::{get_db, ActivityRow};
+use crate::db::{get_db, set_setting_with_conn, ActivityRow};
 use crate::error::Result;
 use crate::history::rebuild_tile_history;
 use crate::models::{TileComputeStatus, TileSource};
-use crate::sync::process_stored_summary;
+use crate::sync::{process_stored_summary, LAST_IGNORED_SPORTS_KEY};
 
 #[derive(Debug)]
 pub struct RecomputeNoveltyResult {
@@ -105,6 +106,11 @@ pub(crate) fn recompute_all_with_conn(
         }
     }
     recompute_novelty_from_stored_tiles_with_conn(settings, conn)?;
+    set_setting_with_conn(
+        conn,
+        LAST_IGNORED_SPORTS_KEY,
+        &Value::String(settings.canonical_ignored_sports()),
+    )?;
     Ok(result)
 }
 

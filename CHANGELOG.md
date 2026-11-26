@@ -4,6 +4,14 @@ All notable changes to this project are documented here, following the Keep a Ch
 
 ## [Unreleased]
 
+### Added
+
+- Guided `tileharvester setup` wizard for one-step Strava credential setup (persisted privately in `<TH_DATA_DIR>/.env`), OAuth login, optional KML baseline import or automatic backfill, and optional rootless systemd timer installation.
+- Automatic initial backfill on the first `sync` against an unbootstrapped database (resuming safely if interrupted, and skipped when a KML baseline is installed).
+- Automatic, rate-limit-aware background GPS stream refinement during `sync` (`TH_AUTO_REFINE`, `TH_AUTO_REFINE_PER_CYCLE`, `TH_AUTO_REFINE_RESERVE_PCT`), prioritizing newest rides first and skipping baseline-covered activities.
+- Automatic local history recompute when `TH_IGNORED_SPORT_TYPES` changes between sync runs.
+- Persistent `<TH_DATA_DIR>/.env` config fallback (`env` > `./.env` > `<TH_DATA_DIR>/.env`) and default local callback capture in `auth` on interactive desktops (`--no-listen` to opt out).
+
 ### Changed
 
 - Leave Strava descriptions untouched for activities with no new Squadrats. When `TH_INCLUDE_SQUADRATINHOS=true`, new Squadratinhos also qualify an activity for annotation.

@@ -1,7 +1,8 @@
 //! Command-line parsing and dispatch.
 
+use std::env;
 use std::ffi::OsString;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +15,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::annotate::format_thousands;
 use crate::backfill::backfill_with_conn;
-use crate::config::Settings;
+use crate::config::{save_env_values, Settings};
 use crate::db;
 use crate::error::{Error, Result};
 use crate::gpx::parse_gpx_file;
@@ -24,12 +25,12 @@ use crate::kml_baseline::{
 };
 use crate::models::TileKind;
 use crate::recompute::{recompute_all_with_conn, recompute_novelty_from_stored_tiles_with_conn};
-use crate::refine::refine_streams_with_conn;
+use crate::refine::{refine_streams_with_conn, unrefined_count_with_conn};
 use crate::squadrats_stats::{compute_grid_metrics, parse_tile_coord, tile_center_lat_lon};
 use crate::strava_client::{classify_strava_error, HttpStravaClient, StravaApi};
 use crate::sync::{
-    clean_stream_segments, compute_historical_novelty_with_conn, retry_failed_with_conn,
-    sync_once_with_conn, STREAM_KEYS,
+    clean_stream_segments, compute_historical_novelty_with_conn, needs_initial_backfill,
+    retry_failed_with_conn, sync_once_with_conn, STREAM_KEYS,
 };
 use crate::systemd::{install_service_with_options, write_service_with_options, ServiceOptions};
 use crate::tile_engine::{make_engine, TileEngine};
@@ -52,6 +53,42 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Interactive first-time setup (credentials, Strava login, history & optional service).
+    Setup {
+        /// Strava API Client ID
+        #[arg(long)]
+        client_id: Option<String>,
+        /// Strava API Client Secret
+        #[arg(long)]
+        client_secret: Option<String>,
+        /// Optional Squadrats KML export to seed an exact baseline
+        #[arg(long, value_name = "PATH")]
+        kml: Option<PathBuf>,
+        /// UTC snapshot timestamp for --kml; defaults to now
+        #[arg(long, value_name = "ISO8601")]
+        as_of: Option<String>,
+        /// Open browser for auth (default)
+        #[arg(long, overrides_with = "no_open_browser")]
+        open_browser: bool,
+        /// Skip opening the browser for auth
+        #[arg(long, overrides_with = "open_browser")]
+        no_open_browser: bool,
+        /// Listen on the local redirect URI to capture the OAuth callback automatically
+        #[arg(long, overrides_with = "no_listen")]
+        listen: bool,
+        /// Do not bind a local OAuth callback listener; prompt to paste the callback URL
+        #[arg(long, overrides_with = "listen")]
+        no_listen: bool,
+        /// Skip immediate backfill during setup (sync will backfill automatically on first run)
+        #[arg(long)]
+        no_backfill: bool,
+        /// Install a rootless systemd user timer without prompting
+        #[arg(long, overrides_with = "no_service")]
+        install_service: bool,
+        /// Skip systemd timer prompt
+        #[arg(long, overrides_with = "install_service")]
+        no_service: bool,
+    },
     /// Authenticate with Strava.
     Auth {
         /// Authorization code or full callback URL from Strava
@@ -63,11 +100,12 @@ enum Command {
         /// Skip opening the browser for auth
         #[arg(long, overrides_with = "open_browser")]
         no_open_browser: bool,
-        #[arg(
-            long,
-            help = "Listen on the local redirect URI to capture the OAuth callback automatically"
-        )]
+        /// Listen on the local redirect URI to capture the OAuth callback automatically
+        #[arg(long, overrides_with = "no_listen")]
         listen: bool,
+        /// Do not bind a local OAuth callback listener; prompt to paste the callback URL
+        #[arg(long, overrides_with = "listen")]
+        no_listen: bool,
     },
     /// One-time backfill of historical activities into local DB.
     Backfill {
@@ -198,14 +236,35 @@ pub fn run() -> i32 {
         return 0;
     }
 
-    let result = Settings::load().and_then(|settings| {
+    let stdin_is_tty = io::stdin().is_terminal();
+    let result = Settings::load().and_then(|mut settings| {
+        let mut stdin = io::stdin().lock();
+        let mut stdout = io::stdout().lock();
+        let mut credentials_checked = false;
+        if let Some(Command::Setup {
+            ref client_id,
+            ref client_secret,
+            ..
+        }) = cli.command
+        {
+            ensure_credentials(
+                &mut settings,
+                client_id.as_deref(),
+                client_secret.as_deref(),
+                &mut stdin,
+                &mut stdout,
+            )?;
+            credentials_checked = true;
+        }
         let api = HttpStravaClient::new(settings.clone())?;
-        Ok(run_cli_with(
+        Ok(run_cli_with_context(
             cli,
             settings,
             &api,
-            &mut io::stdin().lock(),
-            &mut io::stdout().lock(),
+            stdin_is_tty,
+            credentials_checked,
+            &mut stdin,
+            &mut stdout,
         ))
     });
     match result {
@@ -224,6 +283,18 @@ pub fn run_cli_with<R: BufRead, W: Write>(
     input: &mut R,
     output: &mut W,
 ) -> i32 {
+    run_cli_with_context(cli, settings, api, false, false, input, output)
+}
+
+fn run_cli_with_context<R: BufRead, W: Write>(
+    cli: Cli,
+    settings: Settings,
+    api: &dyn StravaApi,
+    stdin_is_tty: bool,
+    credentials_checked: bool,
+    input: &mut R,
+    output: &mut W,
+) -> i32 {
     let result = if cli.version {
         writeln!(output, "{VERSION}")
             .map(|()| 0)
@@ -237,7 +308,16 @@ pub fn run_cli_with<R: BufRead, W: Write>(
     } else if let Some(command) = cli.command {
         db::get_db(&settings).and_then(|mut conn| {
             db::migrate_with_conn(&mut conn)?;
-            dispatch(command, settings, &mut conn, api, input, output)
+            dispatch(
+                command,
+                settings,
+                &mut conn,
+                api,
+                stdin_is_tty,
+                credentials_checked,
+                input,
+                output,
+            )
         })
     } else {
         Ok(0)
@@ -259,11 +339,33 @@ fn strava_context<T>(result: Result<T>, context: &str) -> Result<T> {
     result.map_err(|error| Error::Other(format!("{context}: {}", classify_strava_error(&error))))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListenMode {
+    Auto,
+    Force,
+    Disabled,
+}
+
+impl ListenMode {
+    fn from_flags(listen: bool, no_listen: bool) -> Self {
+        if listen {
+            Self::Force
+        } else if no_listen {
+            Self::Disabled
+        } else {
+            Self::Auto
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn dispatch(
     command: Command,
     mut settings: Settings,
     conn: &mut rusqlite::Connection,
     api: &dyn StravaApi,
+    stdin_is_tty: bool,
+    credentials_checked: bool,
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> Result<i32> {
@@ -280,17 +382,48 @@ fn dispatch(
     }
 
     match command {
+        Command::Setup {
+            client_id,
+            client_secret,
+            kml,
+            as_of,
+            open_browser,
+            no_open_browser,
+            listen,
+            no_listen,
+            no_backfill,
+            install_service,
+            no_service,
+        } => {
+            let options = SetupOptions {
+                client_id,
+                client_secret,
+                kml,
+                as_of,
+                open_browser: open_browser || !no_open_browser,
+                listen_mode: ListenMode::from_flags(listen, no_listen),
+                no_backfill,
+                install_service,
+                no_service,
+                stdin_is_tty,
+                credentials_checked,
+            };
+            setup(&mut settings, conn, api, options, input, output)?;
+        }
         Command::Auth {
             code,
             open_browser,
             no_open_browser,
             listen,
+            no_listen,
         } => {
             auth(
                 api,
                 code,
                 open_browser || !no_open_browser,
-                listen.then_some(settings.strava_redirect_uri.as_str()),
+                ListenMode::from_flags(listen, no_listen),
+                stdin_is_tty,
+                &settings.strava_redirect_uri,
                 input,
                 output,
             )?;
@@ -436,11 +569,255 @@ pub fn extract_code(raw: &str) -> String {
     raw.to_owned()
 }
 
+struct SetupOptions {
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    kml: Option<PathBuf>,
+    as_of: Option<String>,
+    open_browser: bool,
+    listen_mode: ListenMode,
+    no_backfill: bool,
+    install_service: bool,
+    no_service: bool,
+    stdin_is_tty: bool,
+    credentials_checked: bool,
+}
+
+fn prompt_line(prompt: &str, input: &mut impl BufRead, output: &mut impl Write) -> Result<String> {
+    write!(output, "{prompt}")?;
+    output.flush()?;
+    let mut line = String::new();
+    input.read_line(&mut line)?;
+    Ok(line.trim().to_owned())
+}
+
+fn ensure_credentials(
+    settings: &mut Settings,
+    client_id: Option<&str>,
+    client_secret: Option<&str>,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<()> {
+    let mut updated = false;
+    if let Some(id) = client_id.map(str::trim).filter(|v| !v.is_empty()) {
+        settings.strava_client_id = id.to_owned();
+        updated = true;
+    }
+    if let Some(secret) = client_secret.map(str::trim).filter(|v| !v.is_empty()) {
+        settings.strava_client_secret = secret.to_owned();
+        updated = true;
+    }
+
+    let missing_id = settings.strava_client_id.trim().is_empty();
+    let missing_secret = settings.strava_client_secret.trim().is_empty();
+    if missing_id || missing_secret {
+        writeln!(
+            output,
+            "Strava API credentials are required.\n\
+             Create or open your Strava API app at: https://www.strava.com/settings/api\n\
+             Set \"Authorization Callback Domain\" to: localhost"
+        )?;
+        if missing_id {
+            settings.strava_client_id = prompt_line("Strava Client ID: ", input, output)?;
+        }
+        if missing_secret {
+            settings.strava_client_secret = prompt_line("Strava Client Secret: ", input, output)?;
+        }
+        updated = true;
+    }
+
+    settings.validate_strava_credentials()?;
+    if updated {
+        let env_path = settings.env_path();
+        save_env_values(
+            &env_path,
+            &[
+                ("TH_STRAVA_CLIENT_ID", settings.strava_client_id.trim()),
+                (
+                    "TH_STRAVA_CLIENT_SECRET",
+                    settings.strava_client_secret.trim(),
+                ),
+            ],
+        )?;
+        writeln!(output, "Saved Strava credentials to {}", env_path.display())?;
+    } else {
+        writeln!(output, "Strava credentials: already configured.")?;
+    }
+    Ok(())
+}
+
+fn is_container_or_remote() -> bool {
+    Path::new("/.dockerenv").exists()
+        || env::var_os("container").is_some()
+        || env::var_os("SSH_CONNECTION").is_some()
+        || env::var_os("SSH_TTY").is_some()
+}
+
+fn is_loopback_http_redirect(uri: &str) -> bool {
+    url::Url::parse(uri).is_ok_and(|redirect| {
+        matches!(
+            (redirect.scheme(), redirect.host_str()),
+            ("http", Some("localhost" | "127.0.0.1" | "[::1]"))
+        )
+    })
+}
+
+fn can_auto_listen(redirect_uri: &str, stdin_is_tty: bool) -> bool {
+    stdin_is_tty && is_loopback_http_redirect(redirect_uri) && !is_container_or_remote()
+}
+
+fn setup(
+    settings: &mut Settings,
+    conn: &mut rusqlite::Connection,
+    api: &dyn StravaApi,
+    options: SetupOptions,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<()> {
+    writeln!(output, "TileHarvester Setup\n{}", "=".repeat(40))?;
+    if !options.credentials_checked {
+        ensure_credentials(
+            settings,
+            options.client_id.as_deref(),
+            options.client_secret.as_deref(),
+            input,
+            output,
+        )?;
+    }
+
+    if api.is_authenticated() {
+        writeln!(output, "Strava authentication: already connected.")?;
+    } else {
+        auth(
+            api,
+            None,
+            options.open_browser && !is_container_or_remote(),
+            options.listen_mode,
+            options.stdin_is_tty,
+            &settings.strava_redirect_uri,
+            input,
+            output,
+        )?;
+    }
+
+    if let Some(kml_path) = options.kml {
+        import_kml(settings, &kml_path, options.as_of.as_deref(), output)?;
+    } else if needs_initial_backfill(settings, conn)? && !options.no_backfill {
+        let interactive_kml = if options.stdin_is_tty {
+            let answer = prompt_line(
+                "Optional Squadrats KML export path (press Enter to auto-backfill from Strava): ",
+                input,
+                output,
+            )?;
+            (!answer.is_empty()).then(|| PathBuf::from(answer))
+        } else {
+            None
+        };
+        if let Some(kml_path) = interactive_kml {
+            import_kml(settings, &kml_path, options.as_of.as_deref(), output)?;
+        } else {
+            writeln!(output, "Building your local tile history from Strava...")?;
+            let result = strava_context(
+                backfill_with_conn(settings, conn, api, None),
+                "Backfill failed",
+            )?;
+            let remaining = unrefined_count_with_conn(settings, conn)?;
+            writeln!(
+                output,
+                "Backfill complete: {} stored, {} processed.",
+                result.stored, result.processed
+            )?;
+            if remaining > 0 && settings.auto_refine {
+                writeln!(
+                    output,
+                    "{remaining} historical activities will refine to full-GPS accuracy automatically during background sync."
+                )?;
+            }
+        }
+    } else {
+        writeln!(output, "Local tile history: already initialized.")?;
+    }
+
+    let in_container = Path::new("/.dockerenv").exists() || env::var_os("container").is_some();
+    if options.install_service {
+        let svc_options = ServiceOptions {
+            user: true,
+            run_as: None,
+        };
+        with_context(
+            install_service_with_options(
+                settings,
+                None,
+                None,
+                settings.poll_interval_minutes,
+                None,
+                &svc_options,
+                output,
+            ),
+            "Install failed",
+        )?;
+    } else if cfg!(target_os = "linux")
+        && options.stdin_is_tty
+        && !in_container
+        && !options.no_service
+    {
+        let answer = prompt_line(
+            &format!(
+                "Install background systemd user timer (syncs every {} min)? [y/N]: ",
+                settings.poll_interval_minutes
+            ),
+            input,
+            output,
+        )?;
+        if matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes") {
+            let svc_options = ServiceOptions {
+                user: true,
+                run_as: None,
+            };
+            with_context(
+                install_service_with_options(
+                    settings,
+                    None,
+                    None,
+                    settings.poll_interval_minutes,
+                    None,
+                    &svc_options,
+                    output,
+                ),
+                "Install failed",
+            )?;
+            writeln!(
+                output,
+                "Tip: run `loginctl enable-linger \"$USER\"` so the timer keeps running after logout."
+            )?;
+        } else {
+            writeln!(
+                output,
+                "Setup complete! Start syncing anytime with `tileharvester sync`."
+            )?;
+        }
+    } else if in_container {
+        writeln!(
+            output,
+            "Setup complete! Start background syncing with `docker compose up -d`."
+        )?;
+    } else {
+        writeln!(
+            output,
+            "Setup complete! Start syncing anytime with `tileharvester sync`."
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn auth(
     api: &dyn StravaApi,
     code: Option<String>,
     open_browser: bool,
-    redirect_uri: Option<&str>,
+    listen_mode: ListenMode,
+    stdin_is_tty: bool,
+    redirect_uri: &str,
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> Result<()> {
@@ -456,7 +833,22 @@ fn auth(
         }
 
         let url = strava_context(api.build_auth_url(), "Authentication failed")?;
-        let callback = redirect_uri.map(bind_oauth_callback).transpose()?;
+        let callback = match listen_mode {
+            ListenMode::Force => Some(bind_oauth_callback(redirect_uri)?),
+            ListenMode::Auto if can_auto_listen(redirect_uri, stdin_is_tty) => {
+                match bind_oauth_callback(redirect_uri) {
+                    Ok(bound) => Some(bound),
+                    Err(error) => {
+                        writeln!(
+                            output,
+                            "Note: {error}; falling back to manual callback paste."
+                        )?;
+                        None
+                    }
+                }
+            }
+            ListenMode::Auto | ListenMode::Disabled => None,
+        };
         writeln!(output, "Open this URL in your browser:\n{url}")?;
         if open_browser {
             let _ = open::that(&url);
@@ -625,11 +1017,31 @@ fn sync(
             sync_once_with_conn(settings, conn, api, output),
             "Sync failed",
         )?;
+        if result.auto_recomputed {
+            writeln!(
+                output,
+                "Detected updated ignored sport types; recomputed local tile history."
+            )?;
+        }
+        if result.backfilled {
+            writeln!(
+                output,
+                "Auto-backfilled {} historical activities.",
+                result.new_activities
+            )?;
+        }
         writeln!(
             output,
             "Sync complete: {} new, {} processed, {} annotated",
             result.new_activities, result.processed, result.annotated
         )?;
+        if result.refined > 0 {
+            writeln!(
+                output,
+                "Auto-refined {} historical activities ({} remaining).",
+                result.refined, result.unrefined_remaining
+            )?;
+        }
         if result.failed > 0 {
             writeln!(
                 output,
@@ -658,15 +1070,40 @@ fn sync(
     let interval = Duration::from_secs(settings.poll_interval_minutes.saturating_mul(60));
     while !STOPPED.load(Ordering::Relaxed) {
         match sync_once_with_conn(settings, conn, api, output) {
-            Ok(result) if result.annotated > 0 => {
-                writeln!(
-                    output,
-                    "{} Annotated {} activities",
-                    sync_timestamp(),
-                    result.annotated
-                )?;
+            Ok(result) => {
+                if result.auto_recomputed {
+                    writeln!(
+                        output,
+                        "{} Recomputed local tile history after ignored sport changes",
+                        sync_timestamp()
+                    )?;
+                }
+                if result.backfilled {
+                    writeln!(
+                        output,
+                        "{} Auto-backfilled {} historical activities",
+                        sync_timestamp(),
+                        result.new_activities
+                    )?;
+                }
+                if result.annotated > 0 {
+                    writeln!(
+                        output,
+                        "{} Annotated {} activities",
+                        sync_timestamp(),
+                        result.annotated
+                    )?;
+                }
+                if result.refined > 0 {
+                    writeln!(
+                        output,
+                        "{} Auto-refined {} historical activities ({} remaining)",
+                        sync_timestamp(),
+                        result.refined,
+                        result.unrefined_remaining
+                    )?;
+                }
             }
-            Ok(_) => {}
             Err(error) => {
                 writeln!(
                     output,
@@ -698,6 +1135,7 @@ fn status(
     output: &mut impl Write,
 ) -> Result<()> {
     let baseline = get_baseline(settings, conn)?;
+    let unrefined = unrefined_count_with_conn(settings, conn)?;
     writeln!(output, "TileHarvester Status\n{}", "=".repeat(40))?;
     writeln!(
         output,
@@ -711,8 +1149,20 @@ fn status(
         ("Skipped no GPS:", "WHERE status = 'skipped_no_gps'"),
         ("Ignored sports:", "WHERE status = 'skipped_ignored_sport'"),
         ("Failed:", "WHERE status = 'failed'"),
-        ("Stream-refined:", "WHERE status = 'processed' AND tile_source = 'streams_clean'"),
-        ("Needs stream refinement:", "WHERE status = 'processed' AND COALESCE(tile_source, '') != 'streams_clean'"),
+        (
+            "Stream-refined:",
+            "WHERE status = 'processed' AND tile_source = 'streams_clean'",
+        ),
+    ] {
+        let count: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM activities {filter}"),
+            [],
+            |row| row.get(0),
+        )?;
+        writeln!(output, "{label:<27}{count}")?;
+    }
+    writeln!(output, "{:<27}{unrefined}", "Needs stream refinement:")?;
+    for (label, filter) in [
         ("Annotated:", "WHERE annotation_status = 'done'"),
         ("Annotation skipped:", "WHERE annotation_status = 'skipped'"),
         ("Annotation failed:", "WHERE annotation_status = 'failed'"),
@@ -735,6 +1185,15 @@ fn status(
             crate::models::TileKind::Squadratinho.as_str()
         )?
     )?;
+    if settings.auto_refine && settings.auto_refine_per_cycle > 0 {
+        writeln!(
+            output,
+            "Auto-refine:               enabled ({}/cycle, {}% quota reserve)",
+            settings.auto_refine_per_cycle, settings.auto_refine_rate_limit_reserve_pct
+        )?;
+    } else {
+        writeln!(output, "Auto-refine:               disabled")?;
+    }
     if let Some(baseline) = baseline {
         writeln!(
             output,
@@ -1604,5 +2063,73 @@ mod tests {
         assert!(output.contains("ExecStart=/bin/tileharvester sync --once"));
         assert!(output.contains("EnvironmentFile=-/etc/tileharvester.env"));
         assert!(output.contains("OnUnitActiveSec=8min"));
+    }
+
+    #[test]
+    fn setup_accepts_kml_flag_and_auth_no_listen_prompts() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings::with_data_dir(dir.path());
+        let kml = dir.path().join("snapshot.kml");
+        let polygon = "<Polygon><outerBoundaryIs><LinearRing><coordinates>0,0 0.022,0 0.022,-0.022 0,-0.022 0,0</coordinates></LinearRing></outerBoundaryIs></Polygon>";
+        std::fs::write(
+            &kml,
+            format!("<kml><Placemark><name>squadrats</name>{polygon}</Placemark><Placemark><name>squadratinhos</name>{polygon}</Placemark></kml>"),
+        )
+        .unwrap();
+        let (exit, output) = invoke(
+            &settings,
+            &MockApi::default(),
+            &[
+                "setup",
+                "--client-id",
+                "111",
+                "--client-secret",
+                "222",
+                "--kml",
+                kml.to_str().unwrap(),
+                "--as-of",
+                "2026-08-01T00:00:00Z",
+                "--no-open-browser",
+                "--no-listen",
+                "--no-service",
+            ],
+            "https://example.test/?code=a%2Bb\n",
+        );
+        assert_eq!(exit, 0, "{output}");
+        assert!(output.contains("Saved Strava credentials"), "{output}");
+        assert!(output.contains("Authenticated successfully"), "{output}");
+        assert!(
+            output.contains("Imported 1 Squadrats and 64 Squadratinhos"),
+            "{output}"
+        );
+        assert!(output.contains("Setup complete!"), "{output}");
+    }
+
+    #[test]
+    fn auto_listen_falls_back_to_paste_when_port_is_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let busy = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = busy.local_addr().unwrap().port();
+        let mut settings = Settings::with_data_dir(dir.path());
+        settings.strava_redirect_uri = format!("http://127.0.0.1:{port}/callback");
+        let mut output = Vec::new();
+        let mut input = &b"https://example.test/?code=a%2Bb\n"[..];
+        auth(
+            &MockApi::default(),
+            None,
+            false,
+            ListenMode::Auto,
+            true,
+            &settings.strava_redirect_uri,
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(
+            text.contains("Authenticated successfully. Athlete ID: 42"),
+            "{text}"
+        );
+        drop(busy);
     }
 }
