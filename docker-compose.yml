@@ -1,45 +1,36 @@
+# First-time setup: docker compose run --rm tileharvester auth
+# Historical activities: docker compose run --rm tileharvester backfill
+# Start syncing: docker compose up -d
+# Follow logs: docker compose logs -f
+# Check status: docker compose run --rm tileharvester status
+# Back up data: docker compose run --rm tileharvester backup /data/backup.db
 services:
   tileharvester:
+    image: ghcr.io/jb381/tileharvester:latest
     build: .
-    image: tileharvester:latest
-    container_name: tileharvester
-    volumes:
-      - tileharvester-data:/data
-      - ./.env:/app/.env:ro
-    environment:
-      - TH_DATA_DIR=/data
-      # Set these before running:
-      - TH_STRAVA_CLIENT_ID=${TH_STRAVA_CLIENT_ID}
-      - TH_STRAVA_CLIENT_SECRET=${TH_STRAVA_CLIENT_SECRET}
-      - TH_STRAVA_REDIRECT_URI=${TH_STRAVA_REDIRECT_URI:-http://localhost:8000/callback}
-      - TH_POLL_INTERVAL_MINUTES=${TH_POLL_INTERVAL_MINUTES:-5}
-      - TH_SQUADRAT_OFFSET=${TH_SQUADRAT_OFFSET:-0}
-    # For auth command, you need interactive mode:
-    # docker compose run --rm tileharvester auth
-    # For one-shot sync:
-    # docker compose run --rm tileharvester sync --once
-    # For continuous sync (override default):
-    # docker compose run --rm tileharvester sync
-    command: ["--help"]
-
-  # Background sync — runs tileharvester sync in a loop
-  tileharvester-cron:
-    build: .
-    image: tileharvester:latest
-    container_name: tileharvester-cron
-    volumes:
-      - tileharvester-data:/data
-      - ./.env:/app/.env:ro
-    environment:
-      - TH_DATA_DIR=/data
-      - TH_STRAVA_CLIENT_ID=${TH_STRAVA_CLIENT_ID}
-      - TH_STRAVA_CLIENT_SECRET=${TH_STRAVA_CLIENT_SECRET}
-      - TH_POLL_INTERVAL_MINUTES=${TH_POLL_INTERVAL_MINUTES:-5}
-      - TH_SQUADRAT_OFFSET=${TH_SQUADRAT_OFFSET:-0}
-    command: ["sync"]
     restart: unless-stopped
-    profiles:
-      - cron
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - TH_DATA_DIR=/data
+    volumes:
+      - tileharvester-data:/data
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "tileharvester", "health", "--no-check-rate-limit"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   tileharvester-data:

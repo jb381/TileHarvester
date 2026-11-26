@@ -1,0 +1,531 @@
+mod common;
+
+use chrono::Utc;
+use common::{
+    isolated_db,
+    mock_strava::{ActivityRequest, MockStravaApi},
+};
+use serde_json::{json, Value};
+use tileharvester::{
+    backfill::backfill,
+    cli::{parse_from, run_cli_with},
+    config::Settings,
+    db::{get_activity_row, get_db, get_setting, ActivityRow},
+    recompute::{recompute_all, recompute_novelty_from_stored_tiles},
+    refine::refine_streams,
+    sync::{
+        clean_stream_segments, compute_activity_tiles, retry_failed, store_summary, sync_once,
+        LAST_SUCCESSFUL_SYNC_KEY, STREAM_KEYS,
+    },
+};
+
+fn summary(id: i64, sport: &str, route: Option<&str>) -> Value {
+    let now = Utc::now() - chrono::Duration::seconds(60 - id.min(59));
+    json!({"id":id,"start_date":now.to_rfc3339(),"start_date_local":now.naive_utc().format("%Y-%m-%dT%H:%M:%S").to_string(),
+        "sport_type":sport,"map":{"summary_polyline":route}})
+}
+
+fn route(lat: f64, lon: f64) -> String {
+    polyline::encode_coordinates([(lon, lat).into(), (lon, lat + 0.0001).into()], 5).unwrap()
+}
+
+fn stream(lat: f64, lon: f64) -> Value {
+    json!({"latlng":{"data":[[lat,lon],[lat+0.0001,lon]]},"time":{"data":[0,1]}})
+}
+
+fn put(settings: &Settings, activity: &Value) {
+    store_summary(settings, &get_db(settings).unwrap(), activity).unwrap();
+}
+
+fn row(settings: &Settings, id: i64) -> ActivityRow {
+    get_activity_row(&get_db(settings).unwrap(), id)
+        .unwrap()
+        .unwrap()
+}
+
+fn tiles(settings: &Settings, id: i64) -> Vec<(String, i64)> {
+    let conn = get_db(settings).unwrap();
+    let mut query = conn
+        .prepare("SELECT tile_id,is_new FROM activity_tiles WHERE activity_id=? ORDER BY tile_id")
+        .unwrap();
+    query
+        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+fn invoke(settings: &Settings, api: &MockStravaApi, args: &[&str]) -> (i32, String) {
+    let cli = parse_from(std::iter::once("tileharvester").chain(args.iter().copied())).unwrap();
+    let mut output = Vec::new();
+    let exit = run_cli_with(cli, settings.clone(), api, &mut &b""[..], &mut output);
+    (exit, String::from_utf8(output).unwrap())
+}
+
+#[test]
+fn paginated_backfill_respects_limit_and_uses_both_tile_sources() {
+    let (_dir, s) = isolated_db();
+    let mut page = (1..=200)
+        .map(|id| summary(id, "VirtualRide", None))
+        .collect::<Vec<_>>();
+    page[0] = summary(1, "Ride", Some(&route(52.0, 5.0)));
+    page[1] = summary(2, "Ride", None);
+    page[2] = summary(3, "Ride", None);
+    page.extend([
+        summary(201, "VirtualRide", None),
+        summary(202, "Ride", None),
+    ]);
+    let api = MockStravaApi::new()
+        .with_activities(page)
+        .with_streams(2, stream(52.0, 5.0));
+    let result = backfill(&s, &api, Some(201)).unwrap();
+    assert_eq!(
+        api.activity_requests(),
+        [1, 2].map(|page| ActivityRequest {
+            page,
+            per_page: 200,
+            after: None,
+            before: None
+        })
+    );
+    assert_eq!(
+        (result.processed, result.summary_processed, result.failed),
+        (2, 1, 0)
+    );
+    assert_eq!(
+        row(&s, 1)
+            .tile_source
+            .as_ref()
+            .map(|source| source.as_str()),
+        Some("summary_polyline")
+    );
+    assert_eq!(
+        row(&s, 2)
+            .tile_source
+            .as_ref()
+            .map(|source| source.as_str()),
+        Some("streams_clean")
+    );
+    assert!(row(&s, 2).has_gps);
+    assert_eq!(row(&s, 3).status.as_str(), "skipped_no_gps");
+    assert_eq!(row(&s, 201).status.as_str(), "skipped_ignored_sport");
+    assert!(get_activity_row(&get_db(&s).unwrap(), 202)
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        api.stream_calls(),
+        [2, 3].map(|id| (id, STREAM_KEYS.into()))
+    );
+}
+
+#[test]
+fn refinement_limits_force_and_failed_requests_preserve_valid_tiles() {
+    let (_dir, mut s) = isolated_db();
+    s.refine_default_limit = 1;
+    let api = MockStravaApi::new().with_activities(vec![
+        summary(1, "Ride", Some(&route(52.0, 5.0))),
+        summary(2, "Ride", Some(&route(51.0, 5.0))),
+    ]);
+    assert_eq!(backfill(&s, &api, None).unwrap().processed, 2);
+    let limited = refine_streams(&s, &api, None, false).unwrap();
+    assert_eq!((limited.selected, limited.failed), (1, 1));
+    let old = tiles(&s, 1);
+    let api = MockStravaApi::new()
+        .fail_streams_for(1)
+        .with_streams(2, stream(50.0, 5.0));
+    let result = refine_streams(&s, &api, Some(0), false).unwrap();
+    assert_eq!((result.selected, result.refined, result.failed), (2, 1, 1));
+    assert_eq!(row(&s, 1).status.as_str(), "processed");
+    assert!(row(&s, 1).last_error.is_some());
+    assert_eq!(tiles(&s, 1), old);
+    assert_eq!(
+        row(&s, 2)
+            .tile_source
+            .as_ref()
+            .map(|source| source.as_str()),
+        Some("streams_clean")
+    );
+    assert_eq!(refine_streams(&s, &api, Some(0), true).unwrap().selected, 2);
+    assert_eq!(row(&s, 2).status.as_str(), "processed");
+}
+
+#[test]
+fn sync_retries_annotations_without_reprocessing_and_preserves_cursor_on_fetch_failure() {
+    let (_dir, s) = isolated_db();
+    let api = MockStravaApi::new().with_activities(vec![summary(1, "Ride", None)]);
+    let api = api.with_streams(1, stream(52.0, 5.0));
+    let failing = api
+        .with_description(1, "Ride notes")
+        .fail_update_description();
+    let first = sync_once(&s, &failing).unwrap();
+    assert_eq!(
+        (first.new_activities, first.processed, first.failed),
+        (1, 1, 1)
+    );
+    assert_eq!(row(&s, 1).annotation_status.as_str(), "failed");
+    let original = tiles(&s, 1);
+    let api = MockStravaApi::new().with_description(1, "Ride notes");
+    let second = sync_once(&s, &api).unwrap();
+    assert_eq!(
+        (second.processed, second.annotated, second.failed),
+        (0, 1, 0)
+    );
+    assert_eq!(row(&s, 1).annotation_status.as_str(), "done");
+    assert_eq!(tiles(&s, 1), original);
+    assert!(api.current_descriptions()[&1].starts_with("Ride notes\n\n"));
+    let third = sync_once(&s, &api).unwrap();
+    assert_eq!(
+        (third.new_activities, third.processed, third.annotated),
+        (0, 0, 0)
+    );
+    assert_eq!(failing.stream_calls(), [(1, STREAM_KEYS.into())]);
+    assert!(api.stream_calls().is_empty());
+    assert_eq!(failing.annotation_writes().len(), 1);
+    assert_eq!(api.annotation_writes().len(), 1);
+    let cursor = get_setting(&s, LAST_SUCCESSFUL_SYNC_KEY).unwrap();
+    assert!(cursor.is_some());
+    let api = api.fail_fetch();
+    assert!(sync_once(&s, &api).is_err());
+    assert_eq!(get_setting(&s, LAST_SUCCESSFUL_SYNC_KEY).unwrap(), cursor);
+}
+
+#[test]
+fn changed_route_retains_old_history_until_next_poll_succeeds() {
+    let (_dir, s) = isolated_db();
+    let mut activity = summary(1, "Ride", Some(&route(52.0, 5.0)));
+    let api = MockStravaApi::new().with_activities(vec![activity.clone()]);
+    assert_eq!(backfill(&s, &api, None).unwrap().processed, 1);
+    let old = tiles(&s, 1);
+    activity["map"]["summary_polyline"] = json!(route(50.0, 5.0));
+    let api = MockStravaApi::new().with_activities(vec![activity]);
+    let api = api.fail_streams_for(1);
+    let (exit, output) = invoke(&s, &api, &["sync", "--once"]);
+    assert_eq!(exit, 1, "{output}");
+    assert!(
+        output.contains("1 processing or annotation failures"),
+        "{output}"
+    );
+    let stored = row(&s, 1);
+    assert_eq!(stored.status.as_str(), "processed");
+    assert!(stored.stream_refresh_pending);
+    assert_eq!(tiles(&s, 1), old);
+    let api = MockStravaApi::new().with_streams(1, stream(50.0, 5.0));
+    assert_eq!(sync_once(&s, &api).unwrap().processed, 1);
+    assert!(!row(&s, 1).stream_refresh_pending);
+    assert_ne!(tiles(&s, 1), old);
+    assert_eq!(sync_once(&s, &api).unwrap().processed, 0);
+}
+
+#[test]
+fn retry_handles_failed_routes_pending_refresh_and_failed_annotations() {
+    let (_dir, s) = isolated_db();
+    let mut refresh = summary(2, "Ride", Some(&route(52.0, 5.0)));
+    let api = MockStravaApi::new().with_activities(vec![refresh.clone()]);
+    assert_eq!(backfill(&s, &api, None).unwrap().processed, 1);
+    let api = MockStravaApi::new().with_activities(vec![summary(1, "Ride", None), refresh.clone()]);
+    let api = api.fail_streams_for(1);
+    let failing = api.fail_update_description();
+    assert_eq!(sync_once(&s, &failing).unwrap().failed, 2);
+    refresh["map"]["summary_polyline"] = json!(route(50.0, 5.0));
+    put(&s, &refresh);
+    assert!(row(&s, 2).stream_refresh_pending);
+    assert_eq!(row(&s, 1).status.as_str(), "failed");
+    assert_eq!(row(&s, 2).annotation_status.as_str(), "failed");
+    let api = MockStravaApi::new()
+        .with_streams(1, stream(52.0, 5.0))
+        .with_streams(2, stream(50.0, 5.0));
+    let result = retry_failed(&s, &api).unwrap();
+    assert_eq!((result.retried, result.success), (3, 3));
+    assert!(!row(&s, 2).stream_refresh_pending);
+    assert_eq!(row(&s, 2).annotation_status.as_str(), "done");
+    assert_eq!(row(&s, 1).status.as_str(), "processed");
+    assert_eq!(retry_failed(&s, &api).unwrap().retried, 0);
+}
+
+#[test]
+fn unsuccessful_processing_is_retried_on_next_poll_even_without_new_summaries() {
+    let (_dir, s) = isolated_db();
+    let api = MockStravaApi::new().with_activities(vec![summary(1, "Ride", None)]);
+    let api = api.fail_streams_for(1);
+    assert_eq!(sync_once(&s, &api).unwrap().failed, 1);
+    let api = MockStravaApi::new().with_streams(1, stream(52.0, 5.0));
+    let result = sync_once(&s, &api).unwrap();
+    assert_eq!(
+        (result.new_activities, result.processed, result.annotated),
+        (0, 1, 1)
+    );
+}
+
+#[test]
+fn recompute_preserves_streams_rebuilds_summary_and_requeues_allowed_sports() {
+    let (_dir, mut s) = isolated_db();
+    let api = MockStravaApi::new().with_activities(vec![
+        summary(1, "Ride", None),
+        summary(2, "Ride", Some(&route(52.0, 5.0))),
+        summary(3, "VirtualRide", None),
+    ]);
+    let api = api.with_streams(1, stream(52.0, 5.0));
+    assert_eq!(backfill(&s, &api, None).unwrap().processed, 2);
+    assert_eq!(sync_once(&s, &api).unwrap().annotated, 2);
+    let original = tiles(&s, 1);
+    let old_summary = tiles(&s, 2);
+    let conn = get_db(&s).unwrap();
+    conn.execute(
+        "UPDATE activities SET summary_polyline=? WHERE id=2",
+        [route(50.0, 5.0)],
+    )
+    .unwrap();
+    conn.execute("UPDATE activities SET sport_type='Ride' WHERE id=3", [])
+        .unwrap();
+    let result = recompute_all(&s).unwrap();
+    assert_eq!((result.preserved, result.rebuilt, result.failed), (1, 1, 0));
+    assert_eq!(tiles(&s, 1), original);
+    assert_ne!(tiles(&s, 2), old_summary);
+    assert_eq!(row(&s, 3).status.as_str(), "pending");
+    s.rewrite_existing_annotations = true;
+    assert_eq!(recompute_novelty_from_stored_tiles(&s).unwrap().rebuilt, 2);
+    assert_eq!(row(&s, 1).annotation_status.as_str(), "none");
+    assert_eq!(row(&s, 2).annotation_status.as_str(), "none");
+}
+
+#[test]
+fn malformed_and_oversized_streams_fail_per_activity_without_partial_tiles() {
+    let (_dir, mut s) = isolated_db();
+    // Nonrepresentable JSON numbers are rejected by serde_json before stream cleaning.
+    assert!(serde_json::from_str::<Value>(&format!("1{}", "0".repeat(1000))).is_err());
+    let payloads = [
+        Value::Null,
+        json!([]),
+        json!({"latlng":null}),
+        json!({"latlng":{"data":null}}),
+        json!({"latlng":{"data":[{"lat":52,"lon":5}]}}),
+        json!({"time":null}),
+        json!({"latlng":{"data":[[52,5],[52,5]]},"time":{"data":[null,{}]}}),
+        json!({"latlng":{"data":[[1e300,5],[52,5]]}}),
+    ];
+    for (index, payload) in payloads.into_iter().enumerate() {
+        let id = index as i64 + 1;
+        put(&s, &summary(id, "Ride", None));
+        assert!(
+            clean_stream_segments(&s, &payload).is_err(),
+            "payload {index}"
+        );
+        // The shared API filters out non-object responses before returning requested streams.
+        let payload = if payload.is_object() {
+            payload
+        } else {
+            json!({"latlng":null})
+        };
+        let api = MockStravaApi::new().with_streams(id, payload);
+        assert_eq!(
+            compute_activity_tiles(&s, &api, id)
+                .unwrap()
+                .status
+                .as_str(),
+            "failed",
+            "payload {index}"
+        );
+        assert_eq!(row(&s, id).status.as_str(), "failed");
+        assert!(tiles(&s, id).is_empty());
+    }
+    s.stream_max_points = 2;
+    put(&s, &summary(99, "Ride", None));
+    let api = MockStravaApi::new().with_streams(
+        99,
+        json!({"latlng":{"data":[[52,5],[52.0001,5],[52.0002,5]]}}),
+    );
+    let result = compute_activity_tiles(&s, &api, 99).unwrap();
+    assert_eq!(result.status.as_str(), "failed");
+    assert!(result.error.unwrap().contains("TH_STREAM_MAX_POINTS"));
+    assert!(tiles(&s, 99).is_empty());
+
+    let api = api.with_streams(123, json!({"latlng":null}));
+    let (exit, output) = invoke(&s, &api, &["validate", "123"]);
+    assert_eq!(exit, 1, "{output}");
+    assert!(output.contains("Invalid GPS stream"), "{output}");
+}
+
+#[test]
+fn invalid_summary_does_not_abort_backfill() {
+    let (_dir, s) = isolated_db();
+    let api = MockStravaApi::new().with_activities(vec![
+        summary(1, "Ride", Some("_mljP_qo]")),
+        summary(2, "Ride", Some(&route(52.0, 5.0))),
+    ]);
+    let result = backfill(&s, &api, None).unwrap();
+    assert_eq!((result.failed, result.processed), (1, 1));
+    assert!(row(&s, 1).last_error.unwrap().contains("Invalid route"));
+    assert!(tiles(&s, 1).is_empty());
+    assert!(!tiles(&s, 2).is_empty());
+}
+
+#[test]
+fn sport_changes_reconcile_history_and_reactivate_without_summary() {
+    let (_dir, s) = isolated_db();
+    let mut early = summary(1, "Ride", None);
+    put(&s, &early);
+    put(&s, &summary(2, "Ride", None));
+    let api = MockStravaApi::new()
+        .with_streams(1, stream(52.0, 5.0))
+        .with_streams(2, stream(52.0, 5.0));
+    compute_activity_tiles(&s, &api, 2).unwrap();
+    compute_activity_tiles(&s, &api, 1).unwrap();
+    let counts = || (row(&s, 1).new_squadrat_count, row(&s, 2).new_squadrat_count);
+    assert_eq!(counts(), (1, 0));
+    early["sport_type"] = json!("VirtualRide");
+    put(&s, &early);
+    assert_eq!(counts(), (0, 1));
+    early["sport_type"] = json!("Ride");
+    put(&s, &early);
+    assert_eq!(counts(), (1, 0));
+    assert_eq!(row(&s, 1).status.as_str(), "processed");
+}
+
+#[test]
+fn stream_cleaning_splits_gaps_and_accepts_missing_times() {
+    let (_dir, s) = isolated_db();
+    let (segments, stats) =
+        clean_stream_segments(&s, &json!({"latlng":{"data":[[52,5],[52.0001,5],[53,5]]}})).unwrap();
+    assert_eq!(segments, [vec![(52.0, 5.0), (52.0001, 5.0)]]);
+    assert_eq!((stats.spikes_dropped, stats.splits), (1, 0));
+    let (segments, stats) = clean_stream_segments(
+        &s,
+        &json!({"latlng":{"data":[[52,5],[52.0001,5],[53,5],[53.0001,5]]}}),
+    )
+    .unwrap();
+    assert_eq!(segments.iter().map(Vec::len).collect::<Vec<_>>(), [2, 2]);
+    assert_eq!((stats.spikes_dropped, stats.splits), (0, 1));
+    let (segments, stats) =
+        clean_stream_segments(&s, &json!({"latlng":{"data":[[52,5]]}})).unwrap();
+    assert!(segments.is_empty());
+    assert!(stats.warning.is_some());
+    let (segments, _) = clean_stream_segments(&s, &json!({"latlng":{"data":[]}})).unwrap();
+    assert!(segments.is_empty());
+}
+
+#[test]
+fn kml_baseline_suppresses_old_tiles_and_compare_audits_new_activity() {
+    use tileharvester::kml_baseline::{compare_kml, import_baseline};
+    let (_dir, s) = isolated_db();
+    let snapshot = s.data_dir.join("snapshot.kml");
+    let layer = |name: &str, edge: f64| {
+        format!(
+        "<Placemark><name>{name}</name><Polygon><outerBoundaryIs><LinearRing><coordinates>0,0 {edge},0 {edge},{edge} 0,{edge} 0,0</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>"
+    )
+    };
+    let coarse = layer("squadrats", 0.022);
+    let fine = layer("squadratinhos", 0.00275);
+    std::fs::write(
+        &snapshot,
+        format!("<kml><Document>{coarse}{fine}</Document></kml>"),
+    )
+    .unwrap();
+    import_baseline(&s, &snapshot, Some("2020-01-01T00:00:00Z")).unwrap();
+
+    let mut covered = summary(1, "Ride", Some(&route(0.001, 0.001)));
+    covered["start_date"] = json!("2019-12-01T10:00:00Z");
+    covered["start_date_local"] = json!("2019-12-01T10:00:00");
+    put(&s, &covered);
+    let api = MockStravaApi::new()
+        .with_activities(vec![summary(2, "Ride", None), summary(3, "Ride", None)]);
+    let api = api
+        .with_streams(1, stream(0.001, 0.001))
+        .with_streams(2, stream(0.001, 0.001))
+        .with_streams(3, stream(0.001, 0.045));
+    assert_eq!(sync_once(&s, &api).unwrap().processed, 3);
+    assert!(row(&s, 1).baseline_covered);
+    assert_eq!(row(&s, 2).new_squadrat_count, 0);
+    assert_eq!(row(&s, 3).new_squadrat_count, 1);
+    let audit = compare_kml(&s, &snapshot).unwrap();
+    assert_eq!(
+        (
+            audit.squadrat.shared,
+            audit.squadrat.kml_only,
+            audit.squadrat.local_only
+        ),
+        (1, 0, 1)
+    );
+    assert_eq!(
+        (
+            audit.squadratinho.shared,
+            audit.squadratinho.kml_only,
+            audit.squadratinho.local_only
+        ),
+        (1, 0, 1)
+    );
+    assert_eq!(compare_kml(&s, &snapshot).unwrap(), audit);
+
+    let api = api.with_activity(99, summary(99, "Ride", None));
+    let api = api.with_streams(99, stream(0.001, 0.001));
+    let (exit, output) = invoke(&s, &api, &["validate", "99"]);
+    assert_eq!(exit, 0, "{output}");
+    assert!(output.contains("Historical comparison"), "{output}");
+    assert!(
+        output.contains("Already-seen Squadrats on route:   1"),
+        "{output}"
+    );
+    assert!(
+        output.contains("New Squadrats from this activity:  0"),
+        "{output}"
+    );
+    assert!(get_activity_row(&get_db(&s).unwrap(), 99)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn later_recompute_failure_leaves_eligibility_and_history_consistent() {
+    use tileharvester::kml_baseline::effective_tile_count;
+    let (_dir, s) = isolated_db();
+    let api = MockStravaApi::new().with_activities(vec![
+        summary(1, "Ride", Some(&route(52.0, 5.0))),
+        summary(2, "Ride", Some(&route(51.0, 5.0))),
+    ]);
+    assert_eq!(backfill(&s, &api, None).unwrap().processed, 2);
+    let conn = get_db(&s).unwrap();
+    conn.execute_batch(
+        "UPDATE activities SET sport_type='VirtualRide' WHERE id=1;
+        CREATE TRIGGER stop_route BEFORE DELETE ON activity_tiles WHEN OLD.activity_id=2
+        BEGIN SELECT RAISE(ABORT, 'injected route failure'); END;",
+    )
+    .unwrap();
+    let original = tiles(&s, 2);
+    let error = recompute_all(&s).unwrap_err();
+    assert!(error.to_string().contains("injected route failure"));
+    assert_eq!(row(&s, 1).status.as_str(), "skipped_ignored_sport");
+    assert!(tiles(&s, 1).iter().all(|(_, is_new)| *is_new == 0));
+    assert_eq!(tiles(&s, 2), original);
+    assert_eq!(effective_tile_count(&s, "squadrat").unwrap(), 1);
+}
+
+#[test]
+fn annotation_checks_activity_state_and_skips_unchanged_description() {
+    use tileharvester::annotate::annotate_activity;
+    let (_dir, s) = isolated_db();
+    let api = MockStravaApi::new();
+    assert!(annotate_activity(&s, &api, 1).is_err());
+    put(&s, &summary(1, "Ride", None));
+    assert_eq!(
+        annotate_activity(&s, &api, 1).unwrap().status.as_str(),
+        "not_processed"
+    );
+    assert!(api.annotation_writes().is_empty());
+
+    let api = api.with_streams(1, stream(52.0, 5.0));
+    assert_eq!(
+        compute_activity_tiles(&s, &api, 1).unwrap().status.as_str(),
+        "processed"
+    );
+    let annotation = annotate_activity(&s, &api, 1).unwrap();
+    assert_eq!(annotation.status.as_str(), "annotated");
+    assert!(api.current_descriptions()[&1].ends_with(&annotation.line.unwrap()));
+    annotate_activity(&s, &api, 1).unwrap();
+    assert_eq!(
+        api.annotation_writes()
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        [1]
+    );
+    assert_eq!(row(&s, 1).annotation_status.as_str(), "done");
+}
