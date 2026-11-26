@@ -714,6 +714,7 @@ fn status(
         ("Stream-refined:", "WHERE status = 'processed' AND tile_source = 'streams_clean'"),
         ("Needs stream refinement:", "WHERE status = 'processed' AND COALESCE(tile_source, '') != 'streams_clean'"),
         ("Annotated:", "WHERE annotation_status = 'done'"),
+        ("Annotation skipped:", "WHERE annotation_status = 'skipped'"),
         ("Annotation failed:", "WHERE annotation_status = 'failed'"),
         ("Unannotated processed:", "WHERE status = 'processed' AND (annotation_status IS NULL OR annotation_status = 'none')"),
     ] {

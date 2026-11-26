@@ -74,6 +74,25 @@ pub(crate) fn annotate_activity_with_conn(
         return Ok(result);
     }
 
+    let has_new_tiles = row.new_squadrat_count > 0
+        || (settings.include_squadratinhos_in_description && row.new_squadratinho_count > 0);
+    if !has_new_tiles {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE activities
+             SET annotation_status = ?, description_line = NULL, annotated_at = ?, last_error = NULL
+             WHERE id = ?",
+            params![
+                AnnotationStatus::Skipped,
+                Utc::now().to_rfc3339(),
+                activity_id
+            ],
+        )?;
+        tx.commit()?;
+        result.status = AnnotateStatus::Skipped;
+        return Ok(result);
+    }
+
     let (month_total, week_total) = compute_period_totals_with_conn(conn, &row.start_local)?;
     let total = compute_total_unique_squadrats_through_with_conn(settings, conn, activity_id)?;
     let total = format_thousands_i128(i128::from(total) + i128::from(settings.squadrat_offset));
@@ -122,7 +141,7 @@ pub(crate) fn annotate_activity_with_conn(
     match update {
         Ok(()) => {
             tx.execute(
-                "UPDATE activities SET annotation_status = ?, description_line = ?, annotated_at = ? WHERE id = ?",
+                "UPDATE activities SET annotation_status = ?, description_line = ?, annotated_at = ?, last_error = NULL WHERE id = ?",
                 params![AnnotationStatus::Done, line, Utc::now().to_rfc3339(), activity_id],
             )?;
             result.status = AnnotateStatus::Annotated;

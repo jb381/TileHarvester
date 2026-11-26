@@ -12,13 +12,13 @@ Auto-drop [Squadrats](https://squadrats.com/rules) stats into your Strava activi
 
 ## What it does
 
-Every new outdoor activity gets a clean one-liner appended to its Strava description:
+Outdoor activities that discover new Squadrats get a one-liner appended to their Strava descriptions. Activities with no new Squadrats leave the description untouched.
 
 ```text
 🗺️ TileHarvester: 1,234 Squadrats · +13 new · +653/mo · +10/wk
 ```
 
-Want fine-grained z17 tiles in there too? Set `TH_INCLUDE_SQUADRATINHOS=true`:
+Set `TH_INCLUDE_SQUADRATINHOS=true` to include fine-grained z17 tiles. New Squadratinhos then qualify an activity for annotation even if it discovers no new Squadrats.
 
 ```text
 🗺️ TileHarvester: 1,234 Squadrats · +13 new · +653/mo · +10/wk · 12,345 Squadratinhos (+42 new)
@@ -231,7 +231,7 @@ Supply settings via `.env` or environment variables (environment variables alway
 
 ## Development, testing & benchmarking 🛠️
 
-Requires **Rust 1.85+**. The **138-test suite** covers unit tests, CLI binary behavior, workflow integration, regressions, the Liang–Barsky geometric oracle, multi-device Squadratinho stress cases, and real loopback HTTP OAuth/retry mocks.
+Requires **Rust 1.85+**. The **141-test suite** covers unit tests, CLI binary behavior, workflow integration, regressions, the Liang–Barsky geometric oracle, multi-device Squadratinho stress cases, and real loopback HTTP OAuth/retry mocks.
 
 ```bash
 cargo test --all-targets --locked
