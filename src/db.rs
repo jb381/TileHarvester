@@ -482,7 +482,10 @@ mod tests {
         conn.execute_batch(MIGRATIONS[9])?;
         for (index, sql) in MIGRATIONS[..12].iter().enumerate() {
             conn.execute_batch(sql)?;
-            conn.execute("INSERT INTO schema_version VALUES (?)", [index + 1])?;
+            conn.execute(
+                "INSERT INTO schema_version VALUES (?)",
+                [(index + 1) as i64],
+            )?;
         }
         conn.execute_batch(
             "INSERT INTO activities (id, start_utc, start_local, status, annotation_status)
