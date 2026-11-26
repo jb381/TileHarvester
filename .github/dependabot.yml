@@ -2,13 +2,13 @@
 
 version: 2
 updates:
-  - package-ecosystem: "pip"
+  - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
     groups:
-      python-deps:
+      rust-deps:
         patterns: ["*"]
     open-pull-requests-limit: 10
 

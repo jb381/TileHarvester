@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master, fix/review-issues, fix/critical-bugs]
+    branches: [master]
   pull_request:
     branches: [master]
 
@@ -20,44 +20,27 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   lint:
-    name: Ruff Lint
+    name: Rust Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-      - name: Install Python
-        run: uv python install
-      - name: Install dependencies
-        run: uv sync --group dev
-      - name: Run ruff check
-        run: uv run ruff check --output-format=github
-      - name: Run ruff format check
-        run: uv run ruff format --check
-      - name: Run mypy
-        run: uv run mypy tileharvester
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
 
   test:
-    name: Pytest (Python ${{ matrix.python-version }})
+    name: Rust Test
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.12", "3.14"]
     steps:
       - uses: actions/checkout@v7
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-      - name: Install Python
-        run: uv python install ${{ matrix.python-version }}
-      - name: Install dependencies
-        run: uv sync --frozen --group dev --python ${{ matrix.python-version }}
-      - name: Run tests (excluding e2e)
-        run: uv run pytest --cov=tileharvester --cov-report=term-missing -v
-
-      - name: Audit dependencies for CVEs
-        if: matrix.python-version == '3.12'
-        run: |
-          uv export --frozen --no-dev --no-emit-project --output-file=/tmp/requirements.txt
-          uv pip install pip-audit
-          uv run pip-audit -r /tmp/requirements.txt || echo "⚠️ See above for CVEs — Dependabot will update these"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test --all-targets --locked --verbose
+      - name: Build release
+        run: cargo build --release --locked

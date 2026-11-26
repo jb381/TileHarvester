@@ -1,42 +1,31 @@
 # syntax=docker/dockerfile:1
-
-# Build stage
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
-
+FROM rust:1-bookworm AS builder
 WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src benches && echo "" > src/lib.rs && echo "fn main() {}" > src/main.rs && echo "fn main() {}" > benches/engine_benchmarks.rs \
+    && cargo build --release --locked --bin tileharvester \
+    && rm -rf src benches
+COPY src/ ./src/
+COPY benches/ ./benches/
+COPY tests/ ./tests/
+RUN touch src/lib.rs src/main.rs && rm -rf target/release/tileharvester target/release/deps/*tileharvester* \
+    && cargo build --release --locked --bin tileharvester
 
-# Enable bytecode compilation for faster startup
-ENV UV_COMPILE_BYTECODE=1
-ENV UV_LINK_MODE=copy
-
-# Install dependencies without the project itself
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=uv.lock,target=uv.lock \
-    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --frozen --no-install-project --no-dev
-
-# Copy project and install
-COPY . /app
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
-
-# Production stage - minimal runtime image
-FROM python:3.12-slim-bookworm
-
+FROM debian:bookworm-slim
+LABEL org.opencontainers.image.title="TileHarvester" \
+      org.opencontainers.image.description="Automatically add Squadrats stats to Strava activities" \
+      org.opencontainers.image.source="https://github.com/jb381/TileHarvester" \
+      org.opencontainers.image.licenses="MIT"
 WORKDIR /app
-
-# Copy the virtual environment and source code from builder
-COPY --from=builder /app/.venv /app/.venv
-COPY --from=builder /app/tileharvester /app/tileharvester
-
-# Make CLI available
-ENV PATH="/app/.venv/bin:$PATH"
-ENV PYTHONPATH="/app"
-
-# Create data directory for SQLite DB and tokens
-RUN mkdir -p /data
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 tileharvester \
+    && useradd --uid 10001 --gid 10001 --no-create-home tileharvester \
+    && mkdir -p /data && chown tileharvester:tileharvester /app /data
+COPY --from=builder /app/target/release/tileharvester /usr/local/bin/tileharvester
+USER tileharvester
 ENV TH_DATA_DIR=/data
-
-# Default to showing help, override in compose or CLI
+STOPSIGNAL SIGTERM
+HEALTHCHECK --interval=5m --timeout=10s --start-period=15s --retries=3 CMD ["tileharvester", "health", "--no-check-rate-limit"]
 ENTRYPOINT ["tileharvester"]
-CMD ["--help"]
+CMD ["sync"]
